@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>RTTY Art WAV Builder</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root { --bg:#0e0f12; --panel:#16181d; --ink:#e6e7eb; --muted:#9aa0a6; --accent:#7aa2ff; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: system-ui, Segoe UI, Roboto, Helvetica, Arial; background:var(--bg); color:var(--ink); }
+    header { padding:16px 20px; border-bottom:1px solid #222833; background:linear-gradient(180deg,#12141a,#0e0f12); position:sticky; top:0; }
+    h1 { margin:0; font-size:20px; letter-spacing:.3px; }
+    .wrap { padding:12px; display:grid; grid-template-columns: 400px 1fr; gap:12px; }
+    @media (max-width: 900px){ .wrap{ grid-template-columns: 1fr; } }
+    .card { background:var(--panel); border:1px solid #222833; border-radius:14px; padding:12px; }
+    label { display:block; font-size:12px; color:var(--muted); margin-bottom:4px; }
+    input[type="number"], input[type="text"], select { width:100%; padding:10px 12px; border-radius:10px; border:1px solid #2a3040; background:#0f1116; color:var(--ink); }
+    button { padding:10px 12px; border-radius:10px; border:1px solid #2a3040; background:#0f1116; color:var(--ink); cursor:pointer; }
+    button.primary { background:var(--accent); color:#0b0c10; border-color:#2c3e89; font-weight:600; }
+    button:disabled { opacity:.6; cursor:not-allowed; }
+    .row { display:grid; grid-template-columns: 1fr 1fr; gap:8px; margin-bottom:8px; }
+    .status { color:var(--muted); font-size:12px; margin-top:6px; min-height:18px; }
+    .list { max-height:48vh; overflow:auto; border-top:1px dashed #2a3040; margin-top:8px; padding-top:8px; }
+    audio { width:100%; margin-top:10px; }
+    .muted { color:var(--muted); }
+    .inline { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    pre.testlog { background:#0b0c10; color:#c4d2ff; padding:10px; border-radius:10px; border:1px dashed #2a3040; max-height:32vh; overflow:auto; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>RTTY Art WAV Builder</h1>
+  </header>
+
+  <div class="wrap">
+    <div class="card">
+      <div class="row">
+        <div>
+          <label>Data source</label>
+          <select id="dataSource">
+            <option value="remote" selected>Remote (textfiles proxy)</option>
+            <option value="bundled">Bundled (manifest in repo)</option>
+          </select>
+        </div>
+        <div>
+          <label>Count (artworks)</label>
+          <input id="count" type="number" value="25" min="1" max="500" />
+        </div>
+      </div>
+
+      <div id="bundledControls" class="inline" style="display:none">
+        <div style="flex:1 1 260px; min-width:240px;">
+          <label>Manifest URL (relative)</label>
+          <input id="manifestUrl" type="text" value="rtty_offline/manifest.json" />
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button id="loadManifestBtn">Load manifest</button>
+        </div>
+        <div class="muted" id="manifestStatus">not loaded</div>
+      </div>
+
+      <div class="row" style="margin-top:8px;">
+        <div>
+          <label>Baud Rate</label>
+          <input id="baudRate" type="number" value="45.45" step="0.01" />
+        </div>
+        <div>
+          <label>Stop Bits</label>
+          <input id="stopBits" type="number" value="1.5" step="0.1" />
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>Mark Frequency (Hz)</label>
+          <input id="markFreq" type="number" value="2125" />
+        </div>
+        <div>
+          <label>Space Frequency (Hz)</label>
+          <input id="spaceFreq" type="number" value="2295" />
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>Gap between pieces (sec)</label>
+          <input id="gap" type="number" value="2" min="0" step="0.1" />
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button id="buildBtn" class="primary" style="width:100%">Build WAV</button>
+        </div>
+      </div>
+
+      <div id="status" class="status">idle</div>
+      <audio id="player" controls></audio>
+      <div id="downloadWrap" class="status"></div>
+
+      <div style="margin-top:8px; display:flex; gap:8px; align-items:center;">
+        <button id="testBtn">Run self-test</button>
+        <span class="muted">(verifies Baudot, AFSK, and WAV header)</span>
+      </div>
+      <pre id="testLog" class="testlog" style="display:none"></pre>
+    </div>
+
+    <div class="card">
+      <div><b>Selected items</b> <span class="muted" id="countInfo"></span></div>
+      <ol id="list" class="list"></ol>
+    </div>
+  </div>
+
+<script>
+(() => {
+  // ====== Remote source (CORS-safe via proxies) ======
+  const ORIGIN = "https://artscene.textfiles.com/rtty/COLLECTION/";
+  const FIXED_DIRS = Array.from({length:8}, (_,i)=>`ARTWORK-0${i+1}/`);
+  const PROXIES = [
+    "https://r.jina.ai/https://artscene.textfiles.com/rtty/COLLECTION/",
+    "https://r.jina.ai/http://artscene.textfiles.com/rtty/COLLECTION/"
+  ];
+  async function fetchFromAny(path=""){
+    let lastErr;
+    for (const base of PROXIES){
+      try{
+        const r = await fetch(base + path, { cache:"reload" });
+        if (!r.ok) continue;
+        return await r.text();
+      }catch(e){ lastErr = e; }
+    }
+    throw lastErr || new Error("fetch failed");
+  }
+
+  // ====== UI ======
+  const els = {
+    buildBtn: document.getElementById('buildBtn'),
+    status: document.getElementById('status'),
+    player: document.getElementById('player'),
+    list: document.getElementById('list'),
+    countInfo: document.getElementById('countInfo'),
+    downloadWrap: document.getElementById('downloadWrap'),
+    baud: document.getElementById('baudRate'),
+    stopBits: document.getElementById('stopBits'),
+    mark: document.getElementById('markFreq'),
+    space: document.getElementById('spaceFreq'),
+    count: document.getElementById('count'),
+    gap: document.getElementById('gap'),
+    testBtn: document.getElementById('testBtn'),
+    testLog: document.getElementById('testLog'),
+    dataSource: document.getElementById('dataSource'),
+    bundledControls: document.getElementById('bundledControls'),
+    manifestUrl: document.getElementById('manifestUrl'),
+    loadManifestBtn: document.getElementById('loadManifestBtn'),
+    manifestStatus: document.getElementById('manifestStatus'),
+  };
+  const setStatus = s => els.status.textContent = s;
+
+  // ====== Bundled state ======
+  const bundled = { base:"", items:[], loaded:false };
+
+  function toggleBundledUI(){
+    const mode = els.dataSource.value;
+    els.bundledControls.style.display = (mode === 'bundled') ? 'flex' : 'none';
+  }
+  toggleBundledUI();
+  els.dataSource.addEventListener('change', toggleBundledUI);
+
+  function deriveBaseFromUrl(url){
+    // remove filename -> directory
+    const slash = url.lastIndexOf('/');
+    return slash >= 0 ? url.slice(0, slash) : '';
+  }
+
+  async function loadManifest(){
+    try{
+      els.manifestStatus.textContent = 'loading…';
+      const url = els.manifestUrl.value.trim();
+      const res = await fetch(url, { cache:'no-cache' });
+      if (!res.ok) throw new Error('HTTP '+res.status);
+      const json = await res.json();
+      let base="", items=[];
+      if (Array.isArray(json)){
+        items = json.slice();
+        base = deriveBaseFromUrl(url);
+      } else if (json && Array.isArray(json.items)){
+        items = json.items.slice();
+        base = (json.base || '').trim() || deriveBaseFromUrl(url);
+      } else {
+        // Directory map: {"ARTWORK-01":["000","001"], ...}
+        for (const [dir, arr] of Object.entries(json||{})){
+          if (Array.isArray(arr)){
+            for (const f of arr){ items.push(`${dir}/${f}`); }
+          }
+        }
+        base = (json.base || '').trim() || deriveBaseFromUrl(url);
+      }
+      // sanitize
+      items = items.filter(x => /^(ARTWORK-0[1-8])\/([0-9]{3})$/.test(x));
+      if (!items.length) throw new Error('manifest had no valid items');
+      bundled.base = base; bundled.items = items; bundled.loaded = true;
+      els.manifestStatus.textContent = `loaded ${items.length} items from ${base||'(root)'}`;
+      return true;
+    }catch(e){
+      bundled.base = ""; bundled.items = []; bundled.loaded = false;
+      els.manifestStatus.textContent = 'load failed: ' + (e.message||e);
+      return false;
+    }
+  }
+  els.loadManifestBtn.addEventListener('click', loadManifest);
+
+  // ====== Helpers ======
+  function normalizeCRLF(s){ return (s || "").replace(/
+(?!
+)/g, '
+'); }
+
+  // ====== Remote directory & file discovery ======
+  async function getDirs(){
+    try{
+      const html = await fetchFromAny("");
+      const doc = new DOMParser().parseFromString(html, "text/html");
+      let dirs = [...doc.querySelectorAll('a[href]')]
+        .map(a=>a.getAttribute('href')||"")
+        .map(h=> h.endsWith('/') ? h : h + '/')
+        .filter(h=> /^ARTWORK-[0-9]+\/$/.test(h))
+        .filter(d=> /^ARTWORK-0[1-8]\//.test(d));
+      return dirs.length ? dirs : FIXED_DIRS.slice();
+    } catch { return FIXED_DIRS.slice(); }
+  }
+
+  const dirCache = new Map();
+  async function getFiles(dir){
+    if (dirCache.has(dir)) return dirCache.get(dir);
+    try{
+      const html = await fetchFromAny(dir);
+      const doc = new DOMParser().parseFromString(html, "text/html");
+      const files = [...doc.querySelectorAll('a[href]')]
+        .map(a=>({name:(a.textContent||"").trim(), href:a.getAttribute('href')||""}))
+        .filter(o=> /^[0-9]+$/.test(o.name) || /^[0-9]+\/?$/.test(o.href))
+        .map(o=> o.name.endsWith('/') ? o.name.slice(0,-1) : o.name);
+      if (files.length){ dirCache.set(dir, files); return files; }
+    }catch{}
+    const probe = []; for (let i=0;i<=200;i++) probe.push(i.toString().padStart(3,'0'));
+    dirCache.set(dir, probe); return probe;
+  }
+
+  async function fetchArtTextRemote(path){
+    try{
+      const html = await fetchFromAny(path);
+      const doc = new DOMParser().parseFromString(html, "text/html");
+      const pre = doc.querySelector('pre');
+      let text = pre ? (pre.textContent||"") : (doc.body ? doc.body.textContent : html);
+      return normalizeCRLF(text);
+    }catch{ return ""; }
+  }
+
+  async function fetchArtTextBundled(rel){
+    try{
+      const url = (bundled.base ? (bundled.base + '/') : '') + rel;
+      const r = await fetch(url, { cache:'no-cache' });
+      if (!r.ok) return "";
+      const txt = await r.text();
+      return normalizeCRLF(txt);
+    }catch{ return ""; }
+  }
+
+  async function sampleRandomArt(n){
+    if (els.dataSource.value === 'bundled'){
+      if (!bundled.loaded){
+        const ok = await loadManifest();
+        if (!ok) return [];
+      }
+      const seen = new Set();
+      const out = []; let attempts=0, maxAttempts=n*20;
+      while (out.length<n && attempts++<maxAttempts){
+        const item = bundled.items[Math.floor(Math.random()*bundled.items.length)];
+        if (seen.has(item)) continue; seen.add(item);
+        const [dir, file] = item.split('/');
+        out.push({ dir, filename:file, pagePath:item, originUrl:item });
+      }
+      return out;
+    }
+    // Remote
+    const dirs = await getDirs();
+    const chosen = []; const seen = new Set();
+    let attempts = 0, maxAttempts = n * 40;
+    while (chosen.length < n && attempts++ < maxAttempts){
+      const dir = dirs[Math.floor(Math.random()*dirs.length)];
+      const files = await getFiles(dir);
+      if (!files.length) continue;
+      const fn = files[Math.floor(Math.random()*files.length)];
+      const key = dir+fn; if (seen.has(key)) continue; seen.add(key);
+      const cleanDir = dir.endsWith('/') ? dir.slice(0,-1) : dir;
+      chosen.push({ dir: cleanDir, filename: fn, pagePath: dir + fn, originUrl: ORIGIN + dir + fn });
+    }
+    let idx = 0;
+    while (chosen.length < n){
+      for (const dir of dirs){
+        const num = (idx++).toString().padStart(3,'0');
+        const key = dir+num; if (seen.has(key)) continue; seen.add(key);
+        const cleanDir = dir.endsWith('/') ? dir.slice(0,-1) : dir;
+        chosen.push({ dir: cleanDir, filename: num, pagePath: dir + num, originUrl: ORIGIN + dir + num });
+        if (chosen.length >= n) break;
+      }
+    }
+    return chosen.slice(0, n);
+  }
+
+  // ====== BAUDOT / AFSK ======
+  const printableSet = "#ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:;.,-'()/&$?! ";
+  const replacementMap = {
+    '"':"'", '=':'-', '*':'X', '_':'-', '@':'A', '%':'O',
+    '[':'(', ']':')', '{':'(', '}':')', '\':'/', '^':'-', '|':'/',
+    '`':"'", '~':'-', '<':'(', '>':')'
+  };
+  const normalizeChar = ch => {
+    if (ch === '
+' || ch === '
+') return ch; // keep CR/LF
+    const u = ch.toUpperCase();
+    const safe = replacementMap[u] || replacementMap[ch] || u;
+    return printableSet.includes(safe) ? safe : ' ';
+  };
+  const normalizeText = s => [...s].map(normalizeChar).join('');
+
+  const LTRS = 0b11111, FIGS = 0b11011;
+  const BAUDOT_TABLE = {
+    LTRS: {
+      'A':0b00011,'B':0b11001,'C':0b01110,'D':0b01001,'E':0b00001,'F':0b01101,'G':0b11010,'H':0b10100,
+      'I':0b00110,'J':0b01011,'K':0b01111,'L':0b10010,'M':0b11100,'N':0b01100,'O':0b11000,'P':0b10110,
+      'Q':0b10111,'R':0b01010,'S':0b00101,'T':0b10000,'U':0b00111,'V':0b11110,'W':0b10011,'X':0b11101,
+      'Y':0b10101,'Z':0b10001,'
+':0b01000,'
+':0b00010,' ':0b00100
+    },
+    FIGS: {
+      '-':0b00011,'?':0b11001,':':0b01110,'$':0b01001,'3':0b00001,'!':0b01101,'&':0b11010,'#':0b10100,
+      '8':0b00110,"'":0b01011,'(':0b01111,')':0b10010,'.':0b11100,',':0b01100,'9':0b11000,'0':0b10110,
+      '1':0b10111,'4':0b01010,'Bell':0b00101,'5':0b10000,'7':0b00111,';':0b11110,'2':0b10011,'/':0b11101,
+      '6':0b10101,'+':0b10001,'
+':0b01000,'
+':0b00010,' ':0b00100
+    }
+  };
+
+  const GUARD_SHIFT_BITS = 0.0, GUARD_CR_BITS = 0.0, GUARD_LF_BITS = 0.0, LINE_LEAD_MS = 0, START_LEAD_MS = 0, DEFAULT_STRETCH = 1.002;
+  function buildBaudotFramesFromText(text){
+    const frames=[]; let currentShift=null; let lastWasCR=false;
+    frames.push({type:'char', code: BAUDOT_TABLE.LTRS['
+'], guardBits: GUARD_CR_BITS});
+    frames.push({type:'char', code: BAUDOT_TABLE.LTRS['
+'], guardBits: GUARD_LF_BITS});
+    frames.push({type:'char', code: LTRS, guardBits: GUARD_SHIFT_BITS});
+    if (START_LEAD_MS>0) frames.push({type:'hold', sec: START_LEAD_MS/1000});
+    for (const raw of text){
+      const ch = normalizeChar(raw);
+      if (ch==='
+'){ frames.push({type:'char', code: BAUDOT_TABLE.LTRS['
+'], guardBits: GUARD_CR_BITS}); lastWasCR=true; continue; }
+      if (ch==='
+'){
+        if (!lastWasCR) frames.push({type:'char', code: BAUDOT_TABLE.LTRS['
+'], guardBits: GUARD_CR_BITS});
+        frames.push({type:'char', code: BAUDOT_TABLE.LTRS['
+'], guardBits: GUARD_LF_BITS}); lastWasCR=false; if (LINE_LEAD_MS>0) frames.push({type:'hold', sec: LINE_LEAD_MS/1000}); continue;
+      }
+      lastWasCR=false; let needed=null;
+      if (ch in BAUDOT_TABLE.LTRS) needed='LTRS'; else if (ch in BAUDOT_TABLE.FIGS) needed='FIGS'; else continue;
+      if (needed!==currentShift){ frames.push({type:'char', code: (needed==='LTRS'?LTRS:FIGS), guardBits: GUARD_SHIFT_BITS}); currentShift=needed; }
+      frames.push({type:'char', code: BAUDOT_TABLE[needed][ch]});
+    }
+    if (currentShift!=='LTRS') frames.push({type:'char', code: LTRS, guardBits: GUARD_SHIFT_BITS});
+    frames.push({type:'char', code: BAUDOT_TABLE.LTRS['
+'], guardBits: GUARD_CR_BITS});
+    frames.push({type:'char', code: BAUDOT_TABLE.LTRS['
+'], guardBits: GUARD_LF_BITS});
+    return frames;
+  }
+
+  let audioCtx;
+  function getSampleRate(){
+    try{
+      if(!audioCtx){ const Ctx = window.AudioContext||window.webkitAudioContext; audioCtx = new Ctx(); }
+      const sr = audioCtx.sampleRate|0; if (sr>=8000 && sr<=192000) return sr;
+    }catch(e){}
+    return 48000;
+  }
+
+  function afskFromFrames(frames, opts){
+    const { baud, mark, space, stopBits, sampleRate, stretch = DEFAULT_STRETCH } = opts;
+    const twoPi = 2*Math.PI; const spbF = (sampleRate/baud)*stretch; let carry=0, phase=0; const out=[];
+    const emit=(freq, units)=>{ let total = spbF*units + carry; let n = Math.floor(total); carry = total - n; const inc = twoPi*freq/sampleRate; for(let i=0;i<n;i++){ out.push(Math.sin(phase)); phase+=inc; if (phase>=twoPi) phase-=twoPi; } };
+    for (const f of frames){ if (f.type==='hold'){ emit(opts.mark, f.sec*baud); continue; } if (f.type==='char'){ const code=f.code & 0x1F; emit(space,1); for(let i=0;i<5;i++){ const bit=(code>>i)&1; emit(bit?mark:space,1);} emit(mark, stopBits); if (f.guardBits&&f.guardBits>0) emit(mark, f.guardBits); } }
+    emit(mark,2.0); return out;
+  }
+
+  function encodeWav(samples, sampleRate){
+    const buffer = new ArrayBuffer(44 + samples.length*2); const view = new DataView(buffer);
+    const putStr=(o,s)=>{ for(let i=0;i<s.length;i++) view.setUint8(o+i, s.charCodeAt(i)); };
+    putStr(0,'RIFF'); view.setUint32(4, 36 + samples.length*2, true);
+    putStr(8,'WAVE');
+    putStr(12,'fmt '); view.setUint32(16,16,true);
+    view.setUint16(20,1,true); view.setUint16(22,1,true);
+    view.setUint32(24,sampleRate,true); view.setUint32(28,sampleRate*2,true);
+    view.setUint16(32,2,true); view.setUint16(34,16,true);
+    putStr(36,'data'); view.setUint32(40, samples.length*2, true);
+    for(let i=0;i<samples.length;i++){
+      const s=Math.max(-1,Math.min(1,samples[i]))*32767;
+      view.setInt16(44+i*2, s|0, true);
+    }
+    return buffer;
+  }
+
+  // ====== Build one big WAV (silence between pieces; full text) ======
+  els.buildBtn.addEventListener('click', async () => {
+    try{
+      els.buildBtn.disabled = true; els.downloadWrap.textContent = ""; els.player.src = "";
+      const n = Math.max(1, Math.min(500, parseInt(els.count.value||"25",10)));
+      const gapSec = Math.max(0, parseFloat(els.gap.value||"2"));
+
+      setStatus('Sampling artwork…');
+      const picks = await sampleRandomArt(n);
+      if (!picks.length){ setStatus('No items to process'); return; }
+
+      // Render list
+      els.list.innerHTML = picks.map(p=>{
+        const href = (els.dataSource.value==='bundled' && bundled.base) ? `${bundled.base}/${p.pagePath}` : (p.originUrl||p.pagePath);
+        return `<li><a href="${href}" target="_blank" rel="noopener">${p.dir}/${p.filename}</a></li>`;
+      }).join('');
+      els.countInfo.textContent = `(${picks.length})`;
+
+      // Audio params
+      const baud  = parseFloat(els.baud.value||"45.45");
+      const stopB = parseFloat(els.stopBits.value||"1.5");
+      const mark  = parseFloat(els.mark.value||"2125");
+      const space = parseFloat(els.space.value||"2295");
+
+      const sr = getSampleRate();
+      const silence = new Float32Array(Math.max(0, Math.round(sr * gapSec))); // pure silence gap
+      const pcm = [];
+
+      let used = 0;
+      for (let i=0;i<picks.length;i++){
+        setStatus(`Fetching ${i+1}/${picks.length}… ${picks[i].dir}/${picks[i].filename}`);
+        let raw="";
+        if (els.dataSource.value === 'bundled') raw = await fetchArtTextBundled(picks[i].pagePath);
+        else raw = await fetchArtTextRemote(picks[i].pagePath);
+        if (!raw || !raw.trim()) continue; // skip empties
+        const text = normalizeText(raw);    // FULL TEXT
+        const frames = buildBaudotFramesFromText(text);
+        const sig = afskFromFrames(frames, { baud: baud, mark: mark, space: space, stopBits: stopB, sampleRate: sr });
+        if (sig.length){ pcm.push(new Float32Array(sig)); used++; }
+        if (gapSec > 0 && i < picks.length - 1) pcm.push(silence);
+      }
+
+      if (!used){ setStatus('All fetched items were empty or failed to parse.'); return; }
+
+      // Concatenate
+      setStatus('Encoding WAV…');
+      const total = pcm.reduce((acc,a)=>acc + a.length, 0);
+      const out = new Float32Array(total); let off=0; for (const a of pcm){ out.set(a, off); off += a.length; }
+      const wav = encodeWav(out, sr);
+      const blob = new Blob([wav], { type:'audio/wav' });
+      const url = URL.createObjectURL(blob);
+      els.player.src = url; els.player.load();
+      const minutes = (out.length/sr)/60;
+      document.getElementById('downloadWrap').innerHTML = `<a download="rtty_art_${used}.wav" href="${url}">Download WAV</a> · items: ${used} · duration ~ ${minutes.toFixed(1)} min · mode: ${els.dataSource.value}`;
+      setStatus('Ready');
+    }catch(e){
+      console.error(e); setStatus('Error: ' + (e.message||e));
+    }finally{
+      els.buildBtn.disabled = false;
+    }
+  });
+
+  // ====== Self-tests (unchanged + extras) ======
+  function runTests(){
+    const log=[]; const ok=(m)=>log.push('✅ '+m); const bad=(m)=>log.push('❌ '+m);
+    try{
+      const t1 = normalizeText("A\r\nB\C ~@%{}[]|^*");
+      if (!/A
+B\//.test(t1)) bad('normalizeText backslash→/ or CR/LF preservation failed'); else ok('normalizeText maps backslash→/ and preserves CR/LF');
+      if (!t1.includes('AO-()()/')) bad('replacement map for @,% ,{},[],|,^,* failed'); else ok('replacement map for @,% ,{},[],|,^,*');
+      const allowed = new Set((printableSet + "
+").split(''));
+      if ([...t1].some(ch => !allowed.has(ch))) bad('normalizeText emitted characters outside printable set'); else ok('normalizeText only emits allowed chars');
+      if (BAUDOT_TABLE.LTRS['A']!==0b00011) bad('BAUDOT LTRS A code wrong'); else ok('BAUDOT LTRS A');
+      if (!('1' in BAUDOT_TABLE.FIGS)) bad('BAUDOT FIGS 1 missing'); else ok('BAUDOT FIGS 1 present');
+      const frames = buildBaudotFramesFromText("HI
+");
+      if (frames.length<10) bad('frames too short'); else ok('frames built');
+      const fNums = buildBaudotFramesFromText("12
+");
+      const sawFIGS = fNums.some(f => f.type==='char' && f.code===FIGS);
+      if (!sawFIGS) bad('FIGS shift not emitted for digits'); else ok('FIGS shift emitted for digits');
+      const sig = afskFromFrames(frames, { baud:45.45, mark:2125, space:2295, stopBits:1.5, sampleRate:48000 });
+      if (!sig.length) bad('AFSK produced empty signal'); else ok('AFSK produced samples');
+      const wav = encodeWav(new Float32Array(sig), 48000);
+      const dv = new DataView(wav);
+      const tag = String.fromCharCode(dv.getUint8(0),dv.getUint8(1),dv.getUint8(2),dv.getUint8(3));
+      const wave = String.fromCharCode(dv.getUint8(8),dv.getUint8(9),dv.getUint8(10),dv.getUint8(11));
+      const size = dv.getUint32(4,true);
+      if (tag!=='RIFF' || wave!=='WAVE') bad('WAV header tags incorrect'); else ok('WAV header OK');
+      const expectedSize = 36 + (sig.length*2);
+      if (size!==expectedSize) bad('WAV chunk size incorrect'); else ok('WAV chunk size correct');
+      const wav0 = encodeWav(new Float32Array(), 48000);
+      if (wav0.byteLength!==44) bad('Zero-length WAV header size incorrect'); else ok('Zero-length WAV header is 44 bytes');
+      const crOnly = "LINE1
+LINE2
+";
+      const crlf = normalizeCRLF(crOnly);
+      if (!/
+/.test(crlf)) bad('normalizeCRLF did not convert CR to CRLF'); else ok('normalizeCRLF converts CR to CRLF');
+    }catch(e){ bad('Exception in tests: '+(e.message||e)); }
+    els.testLog.style.display='block';
+    els.testLog.textContent = log.join('
+');
+  }
+  els.testBtn.addEventListener('click', runTests);
+})();
+</script>
+</body>
+</html>
