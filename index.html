@@ -15,7 +15,7 @@
     .card { background:var(--panel); border:1px solid #222833; border-radius:14px; padding:12px; }
     label { display:block; font-size:12px; color:var(--muted); margin-bottom:4px; }
     input[type="number"], input[type="text"], select { width:100%; padding:10px 12px; border-radius:10px; border:1px solid #2a3040; background:#0f1116; color:var(--ink); }
-    button { padding:10px 12px; border-radius:10px; border:1px solid #2a3040; background:#0f1116; color:#e6e7eb; cursor:pointer; }
+    button { padding:10px 12px; border-radius:10px; border:1px solid #2a3040; background:#0f1116; color:var(--ink); cursor:pointer; }
     button.primary { background:var(--accent); color:#0b0c10; border-color:#2c3e89; font-weight:600; }
     button:disabled { opacity:.6; cursor:not-allowed; }
     .row { display:grid; grid-template-columns: 1fr 1fr; gap:8px; margin-bottom:8px; }
@@ -110,6 +110,7 @@
 
 <script>
 (() => {
+  'use strict';
   // ====== Remote source (CORS-safe via proxies) ======
   const ORIGIN = "https://artscene.textfiles.com/rtty/COLLECTION/";
   const FIXED_DIRS = Array.from({length:8}, (_,i)=>`ARTWORK-0${i+1}/`);
@@ -153,9 +154,12 @@
   };
   const setStatus = s => els.status.textContent = s;
 
-  // show any runtime JS error in the status line
+  // Show runtime errors in the status line
   window.addEventListener('error', (e) => {
-    els.status.textContent = 'JS error: ' + (e.message || e.error || 'unknown');
+    els.status.textContent = 'JS error: ' + (e.message || (e.error && e.error.message) || e);
+  });
+  window.addEventListener('unhandledrejection', (e) => {
+    els.status.textContent = 'Promise error: ' + (e.reason && (e.reason.message||e.reason));
   });
 
   // ====== Bundled state ======
@@ -188,7 +192,6 @@
         items = json.items.slice();
         base = (json.base || '').trim() || deriveBaseFromUrl(url);
       } else {
-        // Directory map: {"ARTWORK-01":["000","001"], ...}
         for (const [dir, arr] of Object.entries(json||{})){
           if (Array.isArray(arr)){
             for (const f of arr){ items.push(`${dir}/${f}`); }
@@ -196,8 +199,7 @@
         }
         base = (json.base || '').trim() || deriveBaseFromUrl(url);
       }
-      // sanitize
-      items = items.filter(x => /^(ARTWORK-0[1-8])\/([0-9]{3})$/.test(x));
+      items = items.filter(x => /^(ARTWORK-0[1-8])\/(\d{3})$/.test(x));
       if (!items.length) throw new Error('manifest had no valid items');
       bundled.base = base; bundled.items = items; bundled.loaded = true;
       els.manifestStatus.textContent = `loaded ${items.length} items from ${base||'(root)'}`;
@@ -212,7 +214,6 @@
 
   // ====== Helpers ======
   function normalizeCRLF(s){
-    // convert lone CR to CRLF; leave existing CRLF as-is
     return (s || "").replace(/\r(?!\n)/g, "\r\n");
   }
 
@@ -238,7 +239,7 @@
       const doc = new DOMParser().parseFromString(html, "text/html");
       const files = [...doc.querySelectorAll('a[href]')]
         .map(a=>({name:(a.textContent||"").trim(), href:a.getAttribute('href')||""}))
-        .filter(o=> /^[0-9]+$/.test(o.name) || /^[0-9]+\/?$/.test(o.href))
+        .filter(o=> /^\d+$/.test(o.name) || /^\d+\/?$/.test(o.href))
         .map(o=> o.name.endsWith('/') ? o.name.slice(0,-1) : o.name);
       if (files.length){ dirCache.set(dir, files); return files; }
     }catch{}
@@ -312,7 +313,7 @@
   const printableSet = "#ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:;.,-'()/&$?! ";
   const replacementMap = {
     '"':"'", '=':'-', '*':'X', '_':'-', '@':'A', '%':'O',
-    '[':'(', ']':')', '{':'(', '}':')', '\\\\':'/', '^':'-', '|':'/',
+    '[':'(', ']':')', '{':'(', '}':')', '\\':'/', '^':'-', '|':'/',
     '`':"'", '~':'-', '<':'(', '>':')'
   };
   const normalizeChar = ch => {
@@ -349,11 +350,9 @@
     for (const raw of text){
       const ch = normalizeChar(raw);
       if (ch==='\r'){ frames.push({type:'char', code: BAUDOT_TABLE.LTRS['\r'], guardBits: GUARD_CR_BITS}); lastWasCR=true; continue; }
-      if (ch=== '\n'){
+      if (ch==='\n'){
         if (!lastWasCR) frames.push({type:'char', code: BAUDOT_TABLE.LTRS['\r'], guardBits: GUARD_CR_BITS});
-        frames.push({type:'char', code: BAUDOT_TABLE.LTRS['\n'], guardBits: GUARD_LF_BITS}); lastWasCR=false;
-        if (LINE_LEAD_MS>0) frames.push({type:'hold', sec: LINE_LEAD_MS/1000});
-        continue;
+        frames.push({type:'char', code: BAUDOT_TABLE.LTRS['\n'], guardBits: GUARD_LF_BITS}); lastWasCR=false; if (LINE_LEAD_MS>0) frames.push({type:'hold', sec: LINE_LEAD_MS/1000}); continue;
       }
       lastWasCR=false; let needed=null;
       if (ch in BAUDOT_TABLE.LTRS) needed='LTRS'; else if (ch in BAUDOT_TABLE.FIGS) needed='FIGS'; else continue;
@@ -378,4 +377,141 @@
   function afskFromFrames(frames, opts){
     const { baud, mark, space, stopBits, sampleRate, stretch = DEFAULT_STRETCH } = opts;
     const twoPi = 2*Math.PI; const spbF = (sampleRate/baud)*stretch; let carry=0, phase=0; const out=[];
-    const emit=(freq, units)=>{ let total = spbF*units + carry; let n = Math.floor(total); carry = total - n; const inc = twoPi*freq/sampleRate; for(let i=0;i<n;i++){ out.push(Math.sin(phase)); phase+=i
+    const emit=(freq, units)=>{ let total = spbF*units + carry; let n = Math.floor(total); carry = total - n; const inc = twoPi*freq/sampleRate; for(let i=0;i<n;i++){ out.push(Math.sin(phase)); phase+=inc; if (phase>=twoPi) phase-=twoPi; } };
+    for (const f of frames){ if (f.type==='hold'){ emit(opts.mark, f.sec*baud); continue; } if (f.type==='char'){ const code=f.code & 0x1F; emit(space,1); for(let i=0;i<5;i++){ const bit=(code>>i)&1; emit(bit?mark:space,1);} emit(mark, stopBits); if (f.guardBits&&f.guardBits>0) emit(mark, f.guardBits); } }
+    emit(mark,2.0); return out;
+  }
+
+  function encodeWav(samples, sampleRate){
+    const buffer = new ArrayBuffer(44 + samples.length*2); const view = new DataView(buffer);
+    const putStr=(o,s)=>{ for(let i=0;i<s.length;i++) view.setUint8(o+i, s.charCodeAt(i)); };
+    putStr(0,'RIFF'); view.setUint32(4, 36 + samples.length*2, true);
+    putStr(8,'WAVE');
+    putStr(12,'fmt '); view.setUint32(16,16,true);
+    view.setUint16(20,1,true); view.setUint16(22,1,true);
+    view.setUint32(24,sampleRate,true); view.setUint32(28,sampleRate*2,true);
+    view.setUint16(32,2,true); view.setUint16(34,16,true);
+    putStr(36,'data'); view.setUint32(40, samples.length*2, true);
+    for(let i=0;i<samples.length;i++){
+      const s=Math.max(-1,Math.min(1,samples[i]))*32767;
+      view.setInt16(44+i*2, s|0, true);
+    }
+    return buffer;
+  }
+
+  // ====== Build one big WAV (silence between pieces; full text) ======
+  els.buildBtn.addEventListener('click', async () => {
+    try{
+      els.buildBtn.disabled = true; els.downloadWrap.textContent = ""; els.player.src = "";
+      const n = Math.max(1, Math.min(500, parseInt(els.count.value||"25",10)));
+      const gapSec = Math.max(0, parseFloat(els.gap.value||"2"));
+
+      setStatus('Sampling artwork…');
+      const picks = await sampleRandomArt(n);
+      if (!picks.length){ setStatus('No items to process'); return; }
+
+      els.list.innerHTML = picks.map(p=>{
+        const href = (els.dataSource.value==='bundled' && bundled.base) ? `${bundled.base}/${p.pagePath}` : (p.originUrl||p.pagePath);
+        return `<li><a href="${href}" target="_blank" rel="noopener">${p.dir}/${p.filename}</a></li>`;
+      }).join('');
+      els.countInfo.textContent = `(${picks.length})`;
+
+      const baud  = parseFloat(els.baud.value||"45.45");
+      const stopB = parseFloat(els.stopBits.value||"1.5");
+      const mark  = parseFloat(els.mark.value||"2125");
+      const space = parseFloat(els.space.value||"2295");
+
+      const sr = getSampleRate();
+      const silence = new Float32Array(Math.max(0, Math.round(sr * gapSec))); // pure silence gap
+      const pcm = [];
+
+      let used = 0;
+      for (let i=0;i<picks.length;i++){
+        setStatus(`Fetching ${i+1}/${picks.length}… ${picks[i].dir}/${picks[i].filename}`);
+        let raw="";
+        if (els.dataSource.value === 'bundled') raw = await fetchArtTextBundled(picks[i].pagePath);
+        else raw = await fetchArtTextRemote(picks[i].pagePath);
+        if (!raw || !raw.trim()) continue; // skip empties
+        const text = normalizeText(raw);    // FULL TEXT
+        const frames = buildBaudotFramesFromText(text);
+        const sig = afskFromFrames(frames, { baud: baud, mark: mark, space: space, stopBits: stopB, sampleRate: sr });
+        if (sig.length){ pcm.push(new Float32Array(sig)); used++; }
+        if (gapSec > 0 && i < picks.length - 1) pcm.push(silence);
+      }
+
+      if (!used){ setStatus('All fetched items were empty or failed to parse.'); return; }
+
+      setStatus('Encoding WAV…');
+      const total = pcm.reduce((acc,a)=>acc + a.length, 0);
+      const out = new Float32Array(total); let off=0; for (const a of pcm){ out.set(a, off); off += a.length; }
+      const wav = encodeWav(out, sr);
+      const blob = new Blob([wav], { type:'audio/wav' });
+      const url = URL.createObjectURL(blob);
+      els.player.src = url; els.player.load();
+      const minutes = (out.length/sr)/60;
+      document.getElementById('downloadWrap').innerHTML = `<a download="rtty_art_${used}.wav" href="${url}">Download WAV</a> · items: ${used} · duration ~ ${minutes.toFixed(1)} min · mode: ${els.dataSource.value}`;
+      setStatus('Ready');
+    }catch(e){
+      console.error(e); setStatus('Error: ' + (e.message||e));
+    }finally{
+      els.buildBtn.disabled = false;
+    }
+  });
+
+  // ====== Self-tests (fixed/expanded) ======
+  function runTests(){
+    const log=[]; const ok=(m)=>log.push('✅ '+m); const bad=(m)=>log.push('❌ '+m);
+    try{
+      // 1) CRLF preservation
+      const tCRLF = normalizeText("A\r\nB");
+      if (/A\r\nB/.test(tCRLF)) ok('CRLF preserved by normalizeText'); else bad('CRLF not preserved');
+
+      // 2) Backslash mapping to slash
+      const tSlash = normalizeText("X\\Y");
+      if (tSlash.includes('X/Y')) ok('Backslash mapped to slash'); else bad('Backslash mapping failed');
+
+      // 3) Replacement map sanity
+      const sample = normalizeText("~@%{}[]|^*");
+      const expect = "-AO()()/-X"; // ~ -> -, @ -> A, % -> O, { } -> ( ), [ ] -> ( ), | -> /, ^ -> -, * -> X
+      if (sample === expect) ok('Replacement map works'); else bad('Replacement map wrong: ' + sample + ' != ' + expect);
+
+      // 4) Allowed charset only
+      const allowed = new Set((printableSet + "\r\n").split(''));
+      if ([...sample].every(ch => allowed.has(ch))) ok('normalizeText emits only allowed chars'); else bad('normalizeText emitted disallowed chars');
+
+      // 5) BAUDOT table spot checks
+      if (BAUDOT_TABLE.LTRS['A']===0b00011) ok('BAUDOT LTRS A'); else bad('BAUDOT LTRS A code wrong');
+      if ('1' in BAUDOT_TABLE.FIGS) ok('BAUDOT FIGS 1 present'); else bad('BAUDOT FIGS 1 missing');
+
+      // 6) Frame build and FIGS shift for digits
+      const frames = buildBaudotFramesFromText("HI\r\n");
+      if (frames.length>=10) ok('Frames built'); else bad('Frames too short');
+      const fNums = buildBaudotFramesFromText("12\r\n");
+      const sawFIGS = fNums.some(f => f.type==='char' && f.code===FIGS);
+      if (sawFIGS) ok('FIGS shift emitted for digits'); else bad('FIGS shift not emitted for digits');
+
+      // 7) AFSK + WAV header sanity
+      const sig = afskFromFrames(frames, { baud:45.45, mark:2125, space:2295, stopBits:1.5, sampleRate:48000 });
+      if (sig.length>0) ok('AFSK produced samples'); else bad('AFSK produced empty signal');
+      const wav = encodeWav(new Float32Array(sig), 48000);
+      const dv = new DataView(wav);
+      const tag = String.fromCharCode(dv.getUint8(0),dv.getUint8(1),dv.getUint8(2),dv.getUint8(3));
+      const wave = String.fromCharCode(dv.getUint8(8),dv.getUint8(9),dv.getUint8(10),dv.getUint8(11));
+      const size = dv.getUint32(4,true);
+      const expectedSize = 36 + (sig.length*2);
+      if (tag==='RIFF' && wave==='WAVE') ok('WAV header OK'); else bad('WAV header tags incorrect');
+      if (size===expectedSize) ok('WAV chunk size correct'); else bad('WAV chunk size incorrect');
+
+      // 8) normalizeCRLF converts lone CR to CRLF
+      const crOnly = "LINE1\rLINE2\r";
+      const crlf = normalizeCRLF(crOnly);
+      if (/LINE1\r\nLINE2\r\n$/.test(crlf)) ok('normalizeCRLF converts CR to CRLF'); else bad('normalizeCRLF failed');
+    }catch(e){ bad('Exception in tests: '+(e.message||e)); }
+    els.testLog.style.display='block';
+    els.testLog.textContent = log.join('\n');
+  }
+  els.testBtn.addEventListener('click', runTests);
+})();
+</script>
+</body>
+</html>
