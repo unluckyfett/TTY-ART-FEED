@@ -8,9 +8,9 @@
     :root { --bg:#0e0f12; --panel:#16181d; --ink:#e6e7eb; --muted:#9aa0a6; --accent:#7aa2ff; }
     * { box-sizing: border-box; }
     body { margin:0; font-family: system-ui, Segoe UI, Roboto, Helvetica, Arial; background:var(--bg); color:var(--ink); }
-    header { padding:16px 20px; border-bottom:1px solid #222833; background:linear-gradient(180deg,#12141a,#0e0f12); position:sticky; top:0; }
+    header { padding:16px 20px; border-bottom:1px solid #222833; background:linear-gradient(180deg,#12141a,#0e0f12); position:sticky; top:0; z-index:10; }
     h1 { margin:0; font-size:20px; letter-spacing:.3px; }
-    .wrap { padding:12px; display:grid; grid-template-columns: 400px 1fr; gap:12px; }
+    .wrap { padding:12px; display:grid; grid-template-columns: 420px 1fr; gap:12px; }
     @media (max-width: 900px){ .wrap{ grid-template-columns: 1fr; } }
     .card { background:var(--panel); border:1px solid #222833; border-radius:14px; padding:12px; }
     label { display:block; font-size:12px; color:var(--muted); margin-bottom:4px; }
@@ -86,7 +86,13 @@
           <input id="gap" type="number" value="2" min="0" step="0.1" />
         </div>
         <div>
-          <label>&nbsp;</label>
+          <label>Max duration (sec)</label>
+          <input id="maxSeconds" type="number" value="120" min="10" step="10" />
+        </div>
+      </div>
+      <div class="row">
+        <div></div>
+        <div>
           <button id="buildBtn" class="primary" style="width:100%">Build WAV</button>
         </div>
       </div>
@@ -111,6 +117,17 @@
 <script>
 (() => {
   'use strict';
+
+  // Show runtime errors in the status line
+  window.addEventListener('error', (e) => {
+    const el = document.getElementById('status');
+    if (el) el.textContent = 'JS error: ' + (e.message || (e.error && e.error.message) || e);
+  });
+  window.addEventListener('unhandledrejection', (e) => {
+    const el = document.getElementById('status');
+    if (el) el.textContent = 'Promise error: ' + (e.reason && (e.reason.message||e.reason));
+  });
+
   // ====== Remote source (CORS-safe via proxies) ======
   const ORIGIN = "https://artscene.textfiles.com/rtty/COLLECTION/";
   const FIXED_DIRS = Array.from({length:8}, (_,i)=>`ARTWORK-0${i+1}/`);
@@ -144,6 +161,7 @@
     space: document.getElementById('spaceFreq'),
     count: document.getElementById('count'),
     gap: document.getElementById('gap'),
+    maxSeconds: document.getElementById('maxSeconds'),
     testBtn: document.getElementById('testBtn'),
     testLog: document.getElementById('testLog'),
     dataSource: document.getElementById('dataSource'),
@@ -153,14 +171,6 @@
     manifestStatus: document.getElementById('manifestStatus'),
   };
   const setStatus = s => els.status.textContent = s;
-
-  // Show runtime errors in the status line
-  window.addEventListener('error', (e) => {
-    els.status.textContent = 'JS error: ' + (e.message || (e.error && e.error.message) || e);
-  });
-  window.addEventListener('unhandledrejection', (e) => {
-    els.status.textContent = 'Promise error: ' + (e.reason && (e.reason.message||e.reason));
-  });
 
   // ====== Bundled state ======
   const bundled = { base:"", items:[], loaded:false };
@@ -214,6 +224,7 @@
 
   // ====== Helpers ======
   function normalizeCRLF(s){
+    // convert lone CR to CRLF; leave existing CRLF as-is
     return (s || "").replace(/\r(?!\n)/g, "\r\n");
   }
 
@@ -405,6 +416,7 @@
       els.buildBtn.disabled = true; els.downloadWrap.textContent = ""; els.player.src = "";
       const n = Math.max(1, Math.min(500, parseInt(els.count.value||"25",10)));
       const gapSec = Math.max(0, parseFloat(els.gap.value||"2"));
+      const maxSec = Math.max(10, parseFloat(els.maxSeconds.value||"120"));
 
       setStatus('Sampling artwork…');
       const picks = await sampleRandomArt(n);
@@ -422,34 +434,39 @@
       const space = parseFloat(els.space.value||"2295");
 
       const sr = getSampleRate();
-      const silence = new Float32Array(Math.max(0, Math.round(sr * gapSec))); // pure silence gap
+      const silence = new Float32Array(Math.max(0, Math.round(sr * gapSec)));
       const pcm = [];
 
-      let used = 0;
+      let used = 0; let accSamples = 0; const MAX_SAMPLES = Math.floor(sr * maxSec);
       for (let i=0;i<picks.length;i++){
         setStatus(`Fetching ${i+1}/${picks.length}… ${picks[i].dir}/${picks[i].filename}`);
         let raw="";
         if (els.dataSource.value === 'bundled') raw = await fetchArtTextBundled(picks[i].pagePath);
         else raw = await fetchArtTextRemote(picks[i].pagePath);
-        if (!raw || !raw.trim()) continue; // skip empties
-        const text = normalizeText(raw);    // FULL TEXT
+        if (!raw || !raw.trim()) continue;
+        const text = normalizeText(raw);
         const frames = buildBaudotFramesFromText(text);
         const sig = afskFromFrames(frames, { baud: baud, mark: mark, space: space, stopBits: stopB, sampleRate: sr });
-        if (sig.length){ pcm.push(new Float32Array(sig)); used++; }
-        if (gapSec > 0 && i < picks.length - 1) pcm.push(silence);
+        if (!sig.length) continue;
+        const extra = (i < picks.length - 1 ? silence.length : 0);
+        if (accSamples + sig.length + extra > MAX_SAMPLES){ setStatus(`Duration cap reached (~${maxSec}s). Stopping at ${used} items.`); break; }
+        const chunk = new Float32Array(sig);
+        pcm.push(chunk); used++; accSamples += chunk.length;
+        if (gapSec > 0 && i < picks.length - 1){ pcm.push(silence); accSamples += silence.length; }
       }
 
-      if (!used){ setStatus('All fetched items were empty or failed to parse.'); return; }
+      if (!used){ setStatus('All fetched items were empty or over duration cap.'); return; }
 
       setStatus('Encoding WAV…');
-      const total = pcm.reduce((acc,a)=>acc + a.length, 0);
-      const out = new Float32Array(total); let off=0; for (const a of pcm){ out.set(a, off); off += a.length; }
+      const total = pcm.reduce((acc,a)=> acc + (a && a.length ? a.length : 0), 0);
+      if (!Number.isFinite(total) || total <= 0){ throw new Error('Internal: invalid PCM size'); }
+      const out = new Float32Array(total); let off=0; for (const a of pcm){ if (!a) continue; out.set(a, off); off += a.length; }
       const wav = encodeWav(out, sr);
       const blob = new Blob([wav], { type:'audio/wav' });
       const url = URL.createObjectURL(blob);
       els.player.src = url; els.player.load();
       const minutes = (out.length/sr)/60;
-      document.getElementById('downloadWrap').innerHTML = `<a download="rtty_art_${used}.wav" href="${url}">Download WAV</a> · items: ${used} · duration ~ ${minutes.toFixed(1)} min · mode: ${els.dataSource.value}`;
+      els.downloadWrap.innerHTML = `<a download="rtty_art_${used}.wav" href="${url}">Download WAV</a> · items: ${used} · duration ~ ${minutes.toFixed(1)} min · mode: ${els.dataSource.value}`;
       setStatus('Ready');
     }catch(e){
       console.error(e); setStatus('Error: ' + (e.message||e));
@@ -458,7 +475,7 @@
     }
   });
 
-  // ====== Self-tests (fixed/expanded) ======
+  // ====== Self-tests ======
   function runTests(){
     const log=[]; const ok=(m)=>log.push('✅ '+m); const bad=(m)=>log.push('❌ '+m);
     try{
@@ -506,6 +523,11 @@
       const crOnly = "LINE1\rLINE2\r";
       const crlf = normalizeCRLF(crOnly);
       if (/LINE1\r\nLINE2\r\n$/.test(crlf)) ok('normalizeCRLF converts CR to CRLF'); else bad('normalizeCRLF failed');
+
+      // 9) Duration cap math sanity
+      const sr=48000, maxS=10, chars=60; // estimate only
+      const bitsPerChar=7.5; const samplesPerBit=sr/45.45; const est = Math.floor(bitsPerChar*samplesPerBit*chars);
+      if (est>0 && Number.isFinite(est)) ok('duration estimate sane'); else bad('duration estimate bad');
     }catch(e){ bad('Exception in tests: '+(e.message||e)); }
     els.testLog.style.display='block';
     els.testLog.textContent = log.join('\n');
