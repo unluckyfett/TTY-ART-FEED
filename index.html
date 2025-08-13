@@ -91,6 +91,17 @@
         </div>
       </div>
 
+      <div class="row">
+        <div>
+          <label>Max minutes / item</label>
+          <input id="maxMinItem" type="number" value="6" min="0.5" step="0.5" />
+        </div>
+        <div>
+          <label>Max minutes total</label>
+          <input id="maxMinTotal" type="number" value="25" min="1" step="1" />
+        </div>
+      </div>
+
       <div id="status" class="status">idle</div>
       <audio id="player" controls></audio>
       <div id="downloadWrap" class="status"></div>
@@ -162,6 +173,8 @@
     manifestUrl: document.getElementById('manifestUrl'),
     loadManifestBtn: document.getElementById('loadManifestBtn'),
     manifestStatus: document.getElementById('manifestStatus'),
+    maxMinItem: document.getElementById('maxMinItem'),
+    maxMinTotal: document.getElementById('maxMinTotal'),
   };
   const setStatus = s => els.status.textContent = s;
 
@@ -433,9 +446,11 @@
       const sr = getSampleRate();
       const silence = new Float32Array(Math.max(0, Math.round(sr * gapSec))); // pure silence gap
       const pcm = [];
-      // hard caps to avoid huge allocations / "Invalid array length" errors
-      const MAX_TOTAL_SAMPLES = 60_000_000;   // ~20.8 min @ 48kHz
-      const MAX_ITEM_SAMPLES  = 12_000_000;   // ~4.2  min @ 48kHz per artwork
+      // dynamic caps from UI (computed from sample rate)
+      const maxItemMin = Math.max(0.5, parseFloat(els.maxMinItem.value||"6"));
+      const maxTotalMin = Math.max(1, parseFloat(els.maxMinTotal.value||"25"));
+      const MAX_ITEM_SAMPLES  = Math.floor(sr * 60 * maxItemMin);
+      const MAX_TOTAL_SAMPLES = Math.floor(sr * 60 * maxTotalMin);
 
       // exact sample estimator based on frames (preflight before generating samples)
       const spb = (sr / baud) * 1.002; // match DEFAULT_STRETCH
@@ -454,25 +469,34 @@
         return Number.isFinite(est) && est > 0 ? est : 0;
       };
 
+      // stats for diagnostics
+      const stats = { empties:0, estZero:0, tooLong:0, exampleLong:null, stoppedByTotal:false };
+
       let used = 0;
       for (let i=0; i<picks.length; i++){
         setStatus(`Fetching ${i+1}/${picks.length}… ${picks[i].dir}/${picks[i].filename}`);
         let raw="";
         if (els.dataSource.value === 'bundled') raw = await fetchArtTextBundled(picks[i].pagePath);
         else raw = await fetchArtTextRemote(picks[i].pagePath);
-        if (!raw || !raw.trim()) continue; // skip empties
+        if (!raw || !raw.trim()){ stats.empties++; continue; } // skip empties
         const text = normalizeText(raw);    // FULL TEXT
         const frames = buildBaudotFramesFromText(text);
 
         // Preflight size check
         const est = estimateSamples(frames);
-        if (!est) continue;
+        if (!est){ stats.estZero++; continue; }
         if (est > MAX_ITEM_SAMPLES){
+          stats.tooLong++;
+          if (!stats.exampleLong){
+            const minutes = (est/sr)/60;
+            stats.exampleLong = `${picks[i].dir}/${picks[i].filename} ~${minutes.toFixed(1)} min`;
+          }
           console.warn('skip large item', picks[i], est);
           continue; // skip items that are too long individually
         }
         const projectedTotal = pcm.reduce((acc,a)=>acc + a.length, 0) + est + ((gapSec>0 && i<picks.length-1)? silence.length : 0);
         if (projectedTotal > MAX_TOTAL_SAMPLES){
+          stats.stoppedByTotal = true;
           console.warn('reached total cap, stopping at item', i);
           break; // stop adding more to avoid huge allocation later
         }
@@ -483,7 +507,16 @@
         if (gapSec > 0 && i < picks.length - 1) pcm.push(silence);
       }
 
-      if (!used){ setStatus('All fetched items were empty or over duration cap. Lower count or gap.'); return; }
+      if (!used){
+        let msg = 'No items added.';
+        msg += ` empties:${stats.empties}`;
+        msg += ` tooLong:${stats.tooLong}`;
+        if (stats.exampleLong) msg += ` (e.g. ${stats.exampleLong})`;
+        if (stats.stoppedByTotal) msg += ' (hit TOTAL cap)';
+        msg += '. Increase "Max minutes" or reduce Count/Gap.';
+        setStatus(msg);
+        return;
+      }
 
       // Concatenate
       setStatus('Encoding WAV…');
@@ -498,7 +531,9 @@
       const url = URL.createObjectURL(blob);
       els.player.src = url; els.player.load();
       const minutes = (out.length/sr)/60;
-      document.getElementById('downloadWrap').innerHTML = `<a download="rtty_art_${used}.wav" href="${url}">Download WAV</a> · items: ${used} · duration ~ ${minutes.toFixed(1)} min · mode: ${els.dataSource.value}`;
+      const skippedNote = (stats.empties || stats.tooLong || stats.estZero || stats.stoppedByTotal)
+        ? ` <span class="muted">· skipped — empty:${stats.empties} tooLong:${stats.tooLong}${stats.stoppedByTotal?' totalCap:yes':''}</span>` : '';
+      document.getElementById('downloadWrap').innerHTML = `<a download="rtty_art_${used}.wav" href="${url}">Download WAV</a> · items: ${used} · duration ~ ${minutes.toFixed(1)} min · mode: ${els.dataSource.value}${skippedNote}`;
       setStatus('Ready');
     }catch(e){
       console.error(e); setStatus('Error: ' + (e.message||e));
