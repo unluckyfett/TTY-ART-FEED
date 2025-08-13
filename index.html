@@ -431,11 +431,56 @@
 
       const sr = getSampleRate();
       const silence = new Float32Array(Math.max(0, Math.round(sr * gapSec))); // pure silence gap
-      const pcm = [];
+            const pcm = [];
+      // hard caps to avoid huge allocations / "Invalid array length" errors
+      const MAX_TOTAL_SAMPLES = 60_000_000;   // ~20.8 min @ 48kHz
+      const MAX_ITEM_SAMPLES  = 12_000_000;   // ~4.2  min @ 48kHz per artwork
+
+      // exact sample estimator based on frames (preflight before generating samples)
+      const spb = (sr / baud) * 1.002; // match DEFAULT_STRETCH
+      const estimateSamples = (frames) => {
+        let bitUnits = 0;
+        for (const f of frames){
+          if (f.type === 'hold') { bitUnits += (f.sec||0) * baud; continue; }
+          if (f.type === 'char') {
+            bitUnits += 1      // start
+                     + 5      // data
+                     + stopB  // stops
+                     + (f.guardBits||0);
+          }
+        }
+        const est = Math.ceil(bitUnits * spb);
+        return Number.isFinite(est) && est > 0 ? est : 0;
+      };
 
       let used = 0;
       for (let i=0;i<picks.length;i++){
         setStatus(`Fetching ${i+1}/${picks.length}… ${picks[i].dir}/${picks[i].filename}`);
+        let raw="";
+        if (els.dataSource.value === 'bundled') raw = await fetchArtTextBundled(picks[i].pagePath);
+        else raw = await fetchArtTextRemote(picks[i].pagePath);
+        if (!raw || !raw.trim()) continue; // skip empties
+        const text = normalizeText(raw);    // FULL TEXT
+        const frames = buildBaudotFramesFromText(text);
+
+        // Preflight size check
+        const est = estimateSamples(frames);
+        if (!est) continue;
+        if (est > MAX_ITEM_SAMPLES){
+          console.warn('skip large item', picks[i], est);
+          continue; // skip items that are too long individually
+        }
+        const projectedTotal = pcm.reduce((acc,a)=>acc + a.length, 0) + est + ((gapSec>0 && i<picks.length-1)? silence.length : 0);
+        if (projectedTotal > MAX_TOTAL_SAMPLES){
+          console.warn('reached total cap, stopping at item', i);
+          break; // stop adding more to avoid huge allocation later
+        }
+
+        // Generate and store
+        const sig = afskFromFrames(frames, { baud: baud, mark: mark, space: space, stopBits: stopB, sampleRate: sr });
+        if (sig.length){ pcm.push(new Float32Array(sig)); used++; }
+        if (gapSec > 0 && i < picks.length - 1) pcm.push(silence);
+      }/${picks.length}… ${picks[i].dir}/${picks[i].filename}`);
         let raw="";
         if (els.dataSource.value === 'bundled') raw = await fetchArtTextBundled(picks[i].pagePath);
         else raw = await fetchArtTextRemote(picks[i].pagePath);
@@ -447,11 +492,15 @@
         if (gapSec > 0 && i < picks.length - 1) pcm.push(silence);
       }
 
-      if (!used){ setStatus('All fetched items were empty or failed to parse.'); return; }
+      if (!used){ setStatus('All fetched items were empty or over duration cap. Lower count or gap.'); return; }
 
       // Concatenate
       setStatus('Encoding WAV…');
       const total = pcm.reduce((acc,a)=>acc + a.length, 0);
+      if (!Number.isFinite(total) || total <= 0 || total > MAX_TOTAL_SAMPLES){
+        setStatus('Aborted: duration too large for a single WAV. Try fewer items or bundled mode.');
+        return;
+      }
       const out = new Float32Array(total); let off=0; for (const a of pcm){ out.set(a, off); off += a.length; }
       const wav = encodeWav(out, sr);
       const blob = new Blob([wav], { type:'audio/wav' });
@@ -497,20 +546,26 @@
       const crOnly = 'LINE1' + CR + 'LINE2' + CR;
       const crlf = normalizeCRLF(crOnly);
       if (crlf.endsWith('LINE2' + CR + LF)) ok('normalizeCRLF converts CR to CRLF'); else bad('normalizeCRLF did not convert CR to CRLF');
-      // extra tests
       const wav0 = encodeWav(new Float32Array(), 48000);
       if (wav0.byteLength === 44) ok('Zero-length WAV header is 44 bytes'); else bad('Zero-length WAV header wrong size');
       const keep = 'A' + CR + LF + 'B';
       if (normalizeCRLF(keep) === keep) ok('normalizeCRLF leaves CRLF intact'); else bad('normalizeCRLF altered existing CRLF');
       const unknown = normalizeText('🙂');
       if (unknown === ' ') ok('Unknown glyphs map to space'); else bad('Unknown glyph not mapped to space');
-      // fmt/data chunk tags present
       const fmtTag = String.fromCharCode(dv.getUint8(12),dv.getUint8(13),dv.getUint8(14),dv.getUint8(15));
       const dataTag = String.fromCharCode(dv.getUint8(36),dv.getUint8(37),dv.getUint8(38),dv.getUint8(39));
       if (fmtTag==='fmt ' && dataTag==='data') ok('fmt/data chunks present'); else bad('fmt/data chunks missing');
+      // NEW: estimator sanity
+      const framesTest = buildBaudotFramesFromText('TEST' + CR + LF);
+      const est = (function(){
+        let bitUnits=0; for (const f of framesTest){ if (f.type==='hold') bitUnits+= (f.sec||0)*45.45; else if (f.type==='char') bitUnits += 1+5+1.5+(f.guardBits||0); }
+        return Math.ceil(bitUnits * (48000/45.45) * 1.002);
+      })();
+      if (est>0 && Number.isFinite(est)) ok('Estimator returns finite positive'); else bad('Estimator returned invalid');
     }catch(e){ bad('Exception in tests: '+(e.message||e)); }
     els.testLog.style.display='block';
-    els.testLog.textContent = log.join('\n');
+    els.testLog.textContent = log.join('
+');
   }
   els.testBtn.addEventListener('click', runTests);
 })();
