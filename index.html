@@ -29,6 +29,31 @@
     .links a{ display:inline-block; margin:6px 8px 0 0; }
     pre.testlog { background:#0b0c10; color:#c4d2ff; padding:10px; border-radius:10px; border:1px dashed #2a3040; max-height:32vh; overflow:auto; }
 
+    /* Disclaimer */
+    .disclaimer{
+      margin:12px 12px 0;
+      background:linear-gradient(180deg,#141a26,#101521);
+      border:1px solid #2f3a52;
+      border-left:8px solid #ffc107; /* attention yellow */
+      padding:16px 56px 16px 56px; /* extra left for icon, right for close */
+      border-radius:14px;
+      font-size:15px;
+      line-height:1.45;
+      color:var(--ink);
+      position:relative;
+      box-shadow:0 10px 24px rgba(0,0,0,.4), inset 0 0 0 1px rgba(255,193,7,.08);
+    }
+    .disclaimer .close{
+      position:absolute; right:12px; top:10px;
+      background:none; border:none; color:var(--muted);
+      cursor:pointer; font-size:18px; line-height:1; padding:4px; border-radius:8px;
+    }
+
+    /* Extra disclaimer rules */
+    .disclaimer::before{ content:'⚠️'; position:absolute; left:16px; top:50%; transform:translateY(-50%); font-size:22px; filter:drop-shadow(0 1px 0 rgba(0,0,0,.35)); }
+    .disclaimer strong{ font-weight:800; font-size:16px; letter-spacing:.2px; }
+    .disclaimer .close:hover{ background:rgba(255,255,255,0.04); }
+
     /* NSFW modal */
     .modal{ position:fixed; inset:0; background:rgba(0,0,0,0.6); display:none; align-items:center; justify-content:center; z-index:9999; }
     .modal.show{ display:flex; }
@@ -40,6 +65,13 @@
   <header>
     <h1>RTTY Art WAV Builder</h1>
   </header>
+
+  <div id="disclaimer" class="disclaimer" role="note" aria-live="polite">
+    <button id="discClose" class="close" aria-label="Dismiss disclaimer">✕</button>
+    <strong>Disclaimer:</strong> This app aggregates vintage RTTY art from third‑party sources. Some pieces may be insensitive or politically incorrect. I’ve done my best to filter NSFW, but there are no guarantees; viewer discretion is advised. None of the opinions expressed or implied are my own.
+    <br/>
+    <span class="muted">Views and opinions expressed in the sourced artwork are those of the original creators and do not necessarily reflect my views. I do not endorse or take responsibility for any messages, symbols, or depictions shown.</span>
+  </div>
 
   <div id="nsfwModal" class="modal" aria-hidden="true" role="dialog" aria-modal="true">
     <div class="modal-card">
@@ -84,8 +116,8 @@
             <option value="nsfw_women">NSFW Women (ARTWORK-04)</option>
             <option value="symbols_buildings_scouts_homilies">Symbols, Buildings, Scouts, Homilies (ARTWORK-05)</option>
             <option value="space_flags_slogans_portraits">Space, Flags, Slogans, Portraits (ARTWORK-06)</option>
-            <option value="characters_pinups_slogans_starwars">Characters, Pinups, Slogans, Star Wars (ARTWORK-07)</option>
-            <option value="characters_space_slogans">Characters, Space, Slogans (ARTWORK-08)</option>
+            <option value="characters_pinups_slogans_starwars">NSFW Characters, Pinups, Slogans, Star Wars (ARTWORK-07)</option>
+            <option value="characters_space_slogans">NSFW Characters, Space, Slogans (ARTWORK-08)</option>
           </select>
         </div>
         <div></div>
@@ -95,7 +127,7 @@
         <div>
           <label>Content filter</label>
           <select id="nsfwMode">
-            <option value="sfw" selected>SFW (exclude ARTWORK-04, -07, -08)</option>
+            <option value="sfw" selected>SFW (exclude ARTWORK-04, -07, -08 and NSFW List)</option>
             <option value="nsfw">NSFW (includes all collections)</option>
           </select>
         </div>
@@ -206,6 +238,10 @@
     artSet: document.getElementById('artSet')
   };
   var setStatus = function(s){ els.status.textContent = s; };
+
+  // ====== Disclaimer banner (dismiss + persist) ======
+  try{ if (localStorage.getItem('discDismissed') === '1'){ var d0 = document.getElementById('disclaimer'); if (d0) d0.style.display = 'none'; } }catch(e){}
+  (function(){ var d = document.getElementById('disclaimer'); var b = document.getElementById('discClose'); if (b){ b.addEventListener('click', function(){ if (d) d.style.display='none'; try{ localStorage.setItem('discDismissed','1'); }catch(e){} }); } })();
 
   // ====== Preview builder ======
   function renderPreviews(picks){
@@ -701,7 +737,7 @@
       var keep = 'A' + CR + LF + 'B'; if (normalizeCRLF(keep) === keep) ok('normalizeCRLF leaves CRLF intact'); else bad('normalizeCRLF altered existing CRLF');
       var unknown = normalizeText('🙂'); if (unknown === ' ') ok('Unknown glyphs map to space'); else bad('Unknown glyph not mapped to space');
       var swOk = (!isSfwAllowed('ARTWORK-04/000') && !isSfwAllowed('ARTWORK-07/000') && !isSfwAllowed('ARTWORK-08/000') && isSfwAllowed('ARTWORK-03/123'));
-      if (swOk) ok('SFW filter excludes 04,07,08'); else bad('SFW filter failed');
+      if (swOk) ok('SFW filter excludes 04,07,08 and NSFW List'); else bad('SFW filter failed');
       // Art set filter test
       var prevSet = els.artSet ? els.artSet.value : 'all';
       if (els.artSet){ els.artSet.value = 'cartoons'; }
