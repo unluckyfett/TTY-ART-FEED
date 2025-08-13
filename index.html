@@ -10,8 +10,8 @@
     body { margin:0; font-family: system-ui, Segoe UI, Roboto, Helvetica, Arial; background:var(--bg); color:var(--ink); }
     header { padding:16px 20px; border-bottom:1px solid #222833; background:linear-gradient(180deg,#12141a,#0e0f12); position:sticky; top:0; }
     h1 { margin:0; font-size:20px; letter-spacing:.3px; }
-    .wrap { padding:12px; display:grid; grid-template-columns: 400px 1fr; gap:12px; }
-    @media (max-width: 900px){ .wrap{ grid-template-columns: 1fr; } }
+    .wrap { padding:12px; display:grid; grid-template-columns: 420px 1fr; gap:12px; }
+    @media (max-width: 980px){ .wrap{ grid-template-columns: 1fr; } }
     .card { background:var(--panel); border:1px solid #222833; border-radius:14px; padding:12px; }
     label { display:block; font-size:12px; color:var(--muted); margin-bottom:4px; }
     input[type="number"], input[type="text"], select { width:100%; padding:10px 12px; border-radius:10px; border:1px solid #2a3040; background:#0f1116; color:var(--ink); }
@@ -19,12 +19,14 @@
     button.primary { background:var(--accent); color:#0b0c10; border-color:#2c3e89; font-weight:600; }
     button:disabled { opacity:.6; cursor:not-allowed; }
     .row { display:grid; grid-template-columns: 1fr 1fr; gap:8px; margin-bottom:8px; }
+    .row3 { display:grid; grid-template-columns: 1fr 1fr 1fr; gap:8px; margin-bottom:8px; }
     .status { color:var(--muted); font-size:12px; margin-top:6px; min-height:18px; }
     .list { max-height:48vh; overflow:auto; border-top:1px dashed #2a3040; margin-top:8px; padding-top:8px; }
     audio { width:100%; margin-top:10px; }
     .muted { color:var(--muted); }
     .inline { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
     pre.testlog { background:#0b0c10; color:#c4d2ff; padding:10px; border-radius:10px; border:1px dashed #2a3040; max-height:32vh; overflow:auto; }
+    .links a{ display:inline-block; margin:6px 8px 0 0; }
   </style>
 </head>
 <body>
@@ -93,18 +95,29 @@
 
       <div class="row">
         <div>
-          <label>Max minutes / item</label>
-          <input id="maxMinItem" type="number" value="6" min="0.5" step="0.5" />
+          <label>Max minutes / item (0 = no limit, may split mid‑piece)</label>
+          <input id="maxMinItem" type="number" value="0" min="0" step="0.5" />
         </div>
         <div>
-          <label>Max minutes total</label>
-          <input id="maxMinTotal" type="number" value="25" min="1" step="1" />
+          <label>Max minutes total (stops run when reached)</label>
+          <input id="maxMinTotal" type="number" value="60" min="1" step="1" />
+        </div>
+      </div>
+
+      <div class="row">
+        <div>
+          <label>Split every (minutes per file)</label>
+          <input id="splitMin" type="number" value="30" min="1" step="1" />
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <div class="muted">Large jobs become multiple WAVs; first one loads in the player.</div>
         </div>
       </div>
 
       <div id="status" class="status">idle</div>
       <audio id="player" controls></audio>
-      <div id="downloadWrap" class="status"></div>
+      <div id="downloadWrap" class="status links"></div>
 
       <div style="margin-top:8px; display:flex; gap:8px; align-items:center;">
         <button id="testBtn">Run self-test</button>
@@ -175,6 +188,7 @@
     manifestStatus: document.getElementById('manifestStatus'),
     maxMinItem: document.getElementById('maxMinItem'),
     maxMinTotal: document.getElementById('maxMinTotal'),
+    splitMin: document.getElementById('splitMin'),
   };
   const setStatus = s => els.status.textContent = s;
 
@@ -332,7 +346,7 @@
   // ====== BAUDOT / AFSK ======
   const printableSet = "#ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:;.,-'()/&$?! ";
   const replacementMap = {
-    '"':"'", '=':'-', '*':'X', '_':'-', '@':'A', '%':'O',
+    '\"':"'", '=':'-', '*':'X', '_':'-', '@':'A', '%':'O',
     '[':'(', ']':')', '{':'(', '}':')', [String.fromCharCode(92)]:'/', '^':'-', '|':'/',
     '`':"'", '~':'-', '<':'(', '>':')'
   };
@@ -360,69 +374,58 @@
     }
   };
 
-  const GUARD_SHIFT_BITS = 0.0, GUARD_CR_BITS = 0.0, GUARD_LF_BITS = 0.0, LINE_LEAD_MS = 0, START_LEAD_MS = 0, DEFAULT_STRETCH = 1.002;
-  function buildBaudotFramesFromText(text){
-    const frames=[]; let currentShift=null; let lastWasCR=false;
-    frames.push({type:'char', code: BAUDOT_TABLE.LTRS[CR], guardBits: GUARD_CR_BITS});
-    frames.push({type:'char', code: BAUDOT_TABLE.LTRS[LF], guardBits: GUARD_LF_BITS});
-    frames.push({type:'char', code: LTRS, guardBits: GUARD_SHIFT_BITS});
-    if (START_LEAD_MS>0) frames.push({type:'hold', sec: START_LEAD_MS/1000});
-    for (const raw of text){
-      const ch = normalizeChar(raw);
-      if (ch===CR){ frames.push({type:'char', code: BAUDOT_TABLE.LTRS[CR], guardBits: GUARD_CR_BITS}); lastWasCR=true; continue; }
-      if (ch===LF){
-        if (!lastWasCR) frames.push({type:'char', code: BAUDOT_TABLE.LTRS[CR], guardBits: GUARD_CR_BITS});
-        frames.push({type:'char', code: BAUDOT_TABLE.LTRS[LF], guardBits: GUARD_LF_BITS}); lastWasCR=false; if (LINE_LEAD_MS>0) frames.push({type:'hold', sec: LINE_LEAD_MS/1000}); continue;
-      }
-      lastWasCR=false; let needed=null;
-      if (ch in BAUDOT_TABLE.LTRS) needed='LTRS'; else if (ch in BAUDOT_TABLE.FIGS) needed='FIGS'; else continue;
-      if (needed!==currentShift){ frames.push({type:'char', code: (needed==='LTRS'?LTRS:FIGS), guardBits: GUARD_SHIFT_BITS}); currentShift=needed; }
-      frames.push({type:'char', code: BAUDOT_TABLE[needed][ch]});
-    }
-    if (currentShift!=='LTRS') frames.push({type:'char', code: LTRS, guardBits: GUARD_SHIFT_BITS});
-    frames.push({type:'char', code: BAUDOT_TABLE.LTRS[CR], guardBits: GUARD_CR_BITS});
-    frames.push({type:'char', code: BAUDOT_TABLE.LTRS[LF], guardBits: GUARD_LF_BITS});
-    return frames;
-  }
+  const DEFAULT_STRETCH = 1.002;
 
-  let audioCtx;
-  function getSampleRate(){
-    try{
-      if(!audioCtx){ const Ctx = window.AudioContext||window.webkitAudioContext; audioCtx = new Ctx(); }
-      const sr = audioCtx.sampleRate|0; if (sr>=8000 && sr<=192000) return sr;
-    }catch(e){}
-    return 48000;
-  }
-
-  function afskFromFrames(frames, opts){
+  // Streamed AFSK generator -> Int16 chunks
+  function afskStream(frames, opts, onChunk){
     const { baud, mark, space, stopBits, sampleRate, stretch = DEFAULT_STRETCH } = opts;
-    const twoPi = 2*Math.PI; const spbF = (sampleRate/baud)*stretch; let carry=0, phase=0; const out=[];
-    const emit=(freq, units)=>{ let total = spbF*units + carry; let n = Math.floor(total); carry = total - n; const inc = twoPi*freq/sampleRate; for(let i=0;i<n;i++){ out.push(Math.sin(phase)); phase+=inc; if (phase>=twoPi) phase-=twoPi; } };
-    for (const f of frames){ if (f.type==='hold'){ emit(opts.mark, f.sec*baud); continue; } if (f.type==='char'){ const code=f.code & 0x1F; emit(space,1); for(let i=0;i<5;i++){ const bit=(code>>i)&1; emit(bit?mark:space,1);} emit(mark, stopBits); if (f.guardBits&&f.guardBits>0) emit(mark, f.guardBits); } }
-    emit(mark,2.0); return out;
+    const twoPi = 2*Math.PI; const spbF = (sampleRate/baud)*stretch; let carry=0, phase=0;
+    const BLOCK = 16384; let block = new Int16Array(BLOCK); let bi = 0; let total = 0;
+    const pushSample = (s) => {
+      block[bi++] = s;
+      if (bi === block.length){ onChunk(block); block = new Int16Array(BLOCK); bi = 0; }
+      total++;
+    };
+    const flush = () => { if (bi>0){ onChunk(block.slice(0,bi)); bi = 0; } };
+    const emit = (freq, bitUnits) => {
+      let want = Math.floor(spbF*bitUnits + carry); carry = spbF*bitUnits + carry - want;
+      const inc = twoPi*freq/sampleRate;
+      for (let i=0;i<want;i++){
+        const f = Math.sin(phase); phase += inc; if (phase>=twoPi) phase -= twoPi;
+        const s = (f<=1? (f>=-1? f : -1) : 1) * 32767;
+        pushSample(s|0);
+      }
+    };
+    for (const f of frames){
+      if (f.type==='hold'){ emit(mark, (f.sec||0)*baud); continue; }
+      if (f.type==='char'){
+        const code=f.code & 0x1F; emit(space,1); for (let i=0;i<5;i++){ const bit=(code>>i)&1; emit(bit?mark:space,1);} emit(mark, stopBits); if (f.guardBits&&f.guardBits>0) emit(mark, f.guardBits);
+      }
+    }
+    emit(mark,2.0);
+    flush();
+    return total;
   }
 
-  function encodeWav(samples, sampleRate){
-    const buffer = new ArrayBuffer(44 + samples.length*2); const view = new DataView(buffer);
+  // WAV header builder (16-bit PCM mono)
+  function makeWavHeader(sampleRate, sampleCount){
+    const dataBytes = sampleCount * 2 >>> 0; // modulo 2^32 per RIFF
+    const riffSize = (36 + dataBytes) >>> 0;
+    const buffer = new ArrayBuffer(44); const view = new DataView(buffer);
     const putStr=(o,s)=>{ for(let i=0;i<s.length;i++) view.setUint8(o+i, s.charCodeAt(i)); };
-    putStr(0,'RIFF'); view.setUint32(4, 36 + samples.length*2, true);
-    putStr(8,'WAVE');
-    putStr(12,'fmt '); view.setUint32(16,16,true);
+    putStr(0,'RIFF'); view.setUint32(4, riffSize, true);
+    putStr(8,'WAVE'); putStr(12,'fmt '); view.setUint32(16,16,true);
     view.setUint16(20,1,true); view.setUint16(22,1,true);
     view.setUint32(24,sampleRate,true); view.setUint32(28,sampleRate*2,true);
     view.setUint16(32,2,true); view.setUint16(34,16,true);
-    putStr(36,'data'); view.setUint32(40, samples.length*2, true);
-    for(let i=0;i<samples.length;i++){
-      const s=Math.max(-1,Math.min(1,samples[i]))*32767;
-      view.setInt16(44+i*2, s|0, true);
-    }
+    putStr(36,'data'); view.setUint32(40, dataBytes, true);
     return buffer;
   }
 
-  // ====== Build one big WAV (silence between pieces; full text) ======
+  // ====== Build many WAVs (splitting by minutes / WAV limit) ======
   els.buildBtn.addEventListener('click', async () => {
     try{
-      els.buildBtn.disabled = true; els.downloadWrap.textContent = ""; els.player.src = "";
+      els.buildBtn.disabled = true; els.downloadWrap.innerHTML = ''; els.player.src = '';
       const n = Math.max(1, Math.min(500, parseInt(els.count.value||"25",10)));
       const gapSec = Math.max(0, parseFloat(els.gap.value||"2"));
 
@@ -437,104 +440,132 @@
       }).join('');
       els.countInfo.textContent = `(${picks.length})`;
 
-      // Audio params
+      // Params
       const baud  = parseFloat(els.baud.value||"45.45");
       const stopB = parseFloat(els.stopBits.value||"1.5");
       const mark  = parseFloat(els.mark.value||"2125");
       const space = parseFloat(els.space.value||"2295");
-
       const sr = getSampleRate();
-      const silence = new Float32Array(Math.max(0, Math.round(sr * gapSec))); // pure silence gap
-      const pcm = [];
-      // dynamic caps from UI (computed from sample rate)
-      const maxItemMin = Math.max(0.5, parseFloat(els.maxMinItem.value||"6"));
-      const maxTotalMin = Math.max(1, parseFloat(els.maxMinTotal.value||"25"));
-      const MAX_ITEM_SAMPLES  = Math.floor(sr * 60 * maxItemMin);
-      const MAX_TOTAL_SAMPLES = Math.floor(sr * 60 * maxTotalMin);
 
-      // exact sample estimator based on frames (preflight before generating samples)
-      const spb = (sr / baud) * 1.002; // match DEFAULT_STRETCH
+      const maxItemMin = Math.max(0, parseFloat(els.maxMinItem.value||"0"));
+      const maxTotalMin = Math.max(1, parseFloat(els.maxMinTotal.value||"60"));
+      const splitMin = Math.max(1, parseFloat(els.splitMin.value||"30"));
+
+      const PER_ITEM_LIMIT = maxItemMin>0 ? Math.floor(sr*60*maxItemMin) : Number.POSITIVE_INFINITY;
+      const OVERALL_LIMIT  = Math.floor(sr*60*maxTotalMin);
+      const WAV_BYTES_LIMIT = 0xFFFFFFFF - 8; // safety
+      const SEG_LIMIT_BY_SPLIT = Math.floor(sr*60*splitMin);
+      const SEG_LIMIT_BY_WAV = Math.floor(WAV_BYTES_LIMIT/2);
+      const SEG_LIMIT = Math.min(SEG_LIMIT_BY_SPLIT, SEG_LIMIT_BY_WAV);
+
+      // Diagnostics
+      const stats = { empties:0, estZero:0, tooLongSkipped:0, tooLongStreamed:0, stoppedOverall:false, segments:0 };
+
+      // Segment accumulators
+      let segChunks = []; // Uint8Array pieces (PCM)
+      let segSamples = 0; let segIndex = 1; let overallSamples = 0;
+      const openNewSegment = () => { segChunks = []; segSamples = 0; };
+      const flushSegment = () => {
+        if (segSamples <= 0) return null;
+        const header = makeWavHeader(sr, segSamples);
+        const blob = new Blob([header, ...segChunks], { type:'audio/wav' });
+        const url = URL.createObjectURL(blob);
+        const minutes = (segSamples/sr)/60;
+        const a = document.createElement('a');
+        a.href = url; a.download = `rtty_art_seg${String(segIndex).padStart(2,'0')}.wav`;
+        a.textContent = `Download WAV (seg ${segIndex}, ~${minutes.toFixed(1)} min)`;
+        els.downloadWrap.appendChild(a);
+        stats.segments++;
+        if (segIndex === 1){ els.player.src = url; els.player.load(); }
+        segIndex++;
+        return url;
+      };
+      openNewSegment();
+
+      // segment-safe sink
+      const pushPCM = (int16Arr) => {
+        let off = 0;
+        while (off < int16Arr.length){
+          const room = SEG_LIMIT - segSamples;
+          if (room <= 0){ flushSegment(); openNewSegment(); continue; }
+          const take = Math.min(room, int16Arr.length - off);
+          const view = new Uint8Array(int16Arr.buffer, int16Arr.byteOffset + off*2, take*2);
+          // copy to detach from backing buffer
+          const copy = new Uint8Array(take*2); copy.set(view);
+          segChunks.push(copy);
+          segSamples += take; overallSamples += take; off += take;
+          if (overallSamples >= OVERALL_LIMIT){ stats.stoppedOverall = true; return false; }
+        }
+        return true;
+      };
+
+      const emitSilence = async(samples) => {
+        const BLOCK = 16384;
+        while (samples > 0){
+          const take = Math.min(samples, BLOCK);
+          const zeros = new Int16Array(take);
+          if (!pushPCM(zeros)) return false;
+          samples -= take;
+        }
+        return true;
+      };
+
+      // exact sample estimator based on frames (for optional skip only)
+      const spb = (sr / baud) * DEFAULT_STRETCH;
       const estimateSamples = (frames) => {
         let bitUnits = 0;
         for (const f of frames){
           if (f.type === 'hold') { bitUnits += (f.sec||0) * baud; continue; }
-          if (f.type === 'char') {
-            bitUnits += 1      // start
-                     + 5      // data
-                     + stopB  // stops
-                     + (f.guardBits||0);
-          }
+          if (f.type === 'char') { bitUnits += 1 + 5 + stopB + (f.guardBits||0); }
         }
         const est = Math.ceil(bitUnits * spb);
         return Number.isFinite(est) && est > 0 ? est : 0;
       };
 
-      // stats for diagnostics
-      const stats = { empties:0, estZero:0, tooLong:0, exampleLong:null, stoppedByTotal:false };
-
+      // Process items
       let used = 0;
       for (let i=0; i<picks.length; i++){
         setStatus(`Fetching ${i+1}/${picks.length}… ${picks[i].dir}/${picks[i].filename}`);
         let raw="";
         if (els.dataSource.value === 'bundled') raw = await fetchArtTextBundled(picks[i].pagePath);
         else raw = await fetchArtTextRemote(picks[i].pagePath);
-        if (!raw || !raw.trim()){ stats.empties++; continue; } // skip empties
-        const text = normalizeText(raw);    // FULL TEXT
+        if (!raw || !raw.trim()){ stats.empties++; continue; }
+        const text = normalizeText(raw);
         const frames = buildBaudotFramesFromText(text);
 
-        // Preflight size check
         const est = estimateSamples(frames);
-        if (!est){ stats.estZero++; continue; }
-        if (est > MAX_ITEM_SAMPLES){
-          stats.tooLong++;
-          if (!stats.exampleLong){
-            const minutes = (est/sr)/60;
-            stats.exampleLong = `${picks[i].dir}/${picks[i].filename} ~${minutes.toFixed(1)} min`;
-          }
-          console.warn('skip large item', picks[i], est);
-          continue; // skip items that are too long individually
-        }
-        const projectedTotal = pcm.reduce((acc,a)=>acc + a.length, 0) + est + ((gapSec>0 && i<picks.length-1)? silence.length : 0);
-        if (projectedTotal > MAX_TOTAL_SAMPLES){
-          stats.stoppedByTotal = true;
-          console.warn('reached total cap, stopping at item', i);
-          break; // stop adding more to avoid huge allocation later
-        }
+        if (maxItemMin>0 && est>PER_ITEM_LIMIT){ stats.tooLongSkipped++; continue; }
+        if (est>SEG_LIMIT){ stats.tooLongStreamed++; /* will split across files */ }
 
-        // Generate and store
-        const sig = afskFromFrames(frames, { baud: baud, mark: mark, space: space, stopBits: stopB, sampleRate: sr });
-        if (sig.length){ pcm.push(new Float32Array(sig)); used++; }
-        if (gapSec > 0 && i < picks.length - 1) pcm.push(silence);
+        // stream into chunks
+        afskStream(frames, { baud, mark, space, stopBits: stopB, sampleRate: sr }, (i16) => { pushPCM(i16); });
+        used++;
+
+        // gap after, if not last
+        if (gapSec>0 && i<picks.length-1){
+          const gapSamp = Math.max(0, Math.round(sr * gapSec));
+          if (!(await emitSilence(gapSamp))) break;
+        }
+        if (stats.stoppedOverall) break;
       }
 
+      // finalize
+      const lastUrl = flushSegment();
       if (!used){
         let msg = 'No items added.';
         msg += ` empties:${stats.empties}`;
-        msg += ` tooLong:${stats.tooLong}`;
-        if (stats.exampleLong) msg += ` (e.g. ${stats.exampleLong})`;
-        if (stats.stoppedByTotal) msg += ' (hit TOTAL cap)';
-        msg += '. Increase "Max minutes" or reduce Count/Gap.';
+        msg += ` skippedByPerItem:${stats.tooLongSkipped}`;
+        msg += ` splitItems:${stats.tooLongStreamed}`;
+        if (stats.stoppedOverall) msg += ' (hit OVERALL minutes cap)';
+        msg += '. Adjust limits or count.';
         setStatus(msg);
         return;
       }
 
-      // Concatenate
-      setStatus('Encoding WAV…');
-      const total = pcm.reduce((acc,a)=>acc + a.length, 0);
-      if (!Number.isFinite(total) || total <= 0 || total > MAX_TOTAL_SAMPLES){
-        setStatus('Aborted: duration too large for a single WAV. Try fewer items or bundled mode.');
-        return;
-      }
-      const out = new Float32Array(total); let off=0; for (const a of pcm){ out.set(a, off); off += a.length; }
-      const wav = encodeWav(out, sr);
-      const blob = new Blob([wav], { type:'audio/wav' });
-      const url = URL.createObjectURL(blob);
-      els.player.src = url; els.player.load();
-      const minutes = (out.length/sr)/60;
-      const skippedNote = (stats.empties || stats.tooLong || stats.estZero || stats.stoppedByTotal)
-        ? ` <span class="muted">· skipped — empty:${stats.empties} tooLong:${stats.tooLong}${stats.stoppedByTotal?' totalCap:yes':''}</span>` : '';
-      document.getElementById('downloadWrap').innerHTML = `<a download="rtty_art_${used}.wav" href="${url}">Download WAV</a> · items: ${used} · duration ~ ${minutes.toFixed(1)} min · mode: ${els.dataSource.value}${skippedNote}`;
-      setStatus('Ready');
+      const totalMin = (overallSamples/sr)/60;
+      const note = stats.stoppedOverall ? ' · hit overall cap' : '';
+      setStatus(`Ready · segments: ${stats.segments} · items: ${used} · total ~ ${totalMin.toFixed(1)} min${note}`);
+
     }catch(e){
       console.error(e); setStatus('Error: ' + (e.message||e));
     }finally{
@@ -543,9 +574,25 @@
   });
 
   // ====== Self-tests ======
+  function encodeWav(samples, sampleRate){ // kept for tests
+    const buffer = new ArrayBuffer(44 + samples.length*2); const view = new DataView(buffer);
+    const putStr=(o,s)=>{ for(let i=0;i<s.length;i++) view.setUint8(o+i, s.charCodeAt(i)); };
+    putStr(0,'RIFF'); view.setUint32(4, 36 + samples.length*2, true);
+    putStr(8,'WAVE'); putStr(12,'fmt '); view.setUint32(16,16,true);
+    view.setUint16(20,1,true); view.setUint16(22,1,true);
+    view.setUint32(24,sampleRate,true); view.setUint32(28,sampleRate*2,true);
+    view.setUint16(32,2,true); view.setUint16(34,16,true);
+    putStr(36,'data'); view.setUint32(40, samples.length*2, true);
+    for(let i=0;i<samples.length;i++){
+      const s=Math.max(-1,Math.min(1,samples[i]))*32767; view.setInt16(44+i*2, s|0, true);
+    }
+    return buffer;
+  }
+
   function runTests(){
     const log=[]; const ok=(m)=>log.push('✅ '+m); const bad=(m)=>log.push('❌ '+m);
     try{
+      // existing tests
       const tCRLF = normalizeText('A' + CR + LF + 'B');
       if (tCRLF.indexOf('A' + CR + LF + 'B') !== -1) ok('CRLF preserved by normalizeText'); else bad('CRLF not preserved');
       const tSlash = normalizeText('X' + String.fromCharCode(92) + 'Y');
@@ -562,32 +609,31 @@
       const fNums = buildBaudotFramesFromText('12' + CR + LF);
       const sawFIGS = fNums.some(f => f.type==='char' && f.code===FIGS);
       if (sawFIGS) ok('FIGS shift emitted for digits'); else bad('FIGS shift not emitted for digits');
-      const sig = afskFromFrames(frames, { baud:45.45, mark:2125, space:2295, stopBits:1.5, sampleRate:48000 });
-      if (sig.length>0) ok('AFSK produced samples'); else bad('AFSK produced empty signal');
+      const sig = (function(){
+        // tiny signal for header test
+        const arr = []; const twoPi=2*Math.PI; let ph=0; const inc=twoPi*100/48000; for(let i=0;i<1000;i++){ arr.push(Math.sin(ph)); ph+=inc; }
+        return arr;
+      })();
       const wav = encodeWav(new Float32Array(sig), 48000);
       const dv = new DataView(wav);
       const tag = String.fromCharCode(dv.getUint8(0),dv.getUint8(1),dv.getUint8(2),dv.getUint8(3));
       const wave = String.fromCharCode(dv.getUint8(8),dv.getUint8(9),dv.getUint8(10),dv.getUint8(11));
       if (tag==='RIFF' && wave==='WAVE') ok('WAV header OK'); else bad('WAV header incorrect');
-      const crOnly = 'LINE1' + CR + 'LINE2' + CR;
-      const crlf = normalizeCRLF(crOnly);
+      const crOnly = 'LINE1' + CR + 'LINE2' + CR; const crlf = normalizeCRLF(crOnly);
       if (crlf.endsWith('LINE2' + CR + LF)) ok('normalizeCRLF converts CR to CRLF'); else bad('normalizeCRLF did not convert CR to CRLF');
-      const wav0 = encodeWav(new Float32Array(), 48000);
-      if (wav0.byteLength === 44) ok('Zero-length WAV header is 44 bytes'); else bad('Zero-length WAV header wrong size');
-      const keep = 'A' + CR + LF + 'B';
-      if (normalizeCRLF(keep) === keep) ok('normalizeCRLF leaves CRLF intact'); else bad('normalizeCRLF altered existing CRLF');
-      const unknown = normalizeText('🙂');
-      if (unknown === ' ') ok('Unknown glyphs map to space'); else bad('Unknown glyph not mapped to space');
+      const wav0 = encodeWav(new Float32Array(), 48000); if (wav0.byteLength === 44) ok('Zero-length WAV header is 44 bytes'); else bad('Zero-length WAV header wrong size');
+      const keep = 'A' + CR + LF + 'B'; if (normalizeCRLF(keep) === keep) ok('normalizeCRLF leaves CRLF intact'); else bad('normalizeCRLF altered existing CRLF');
+      const unknown = normalizeText('🙂'); if (unknown === ' ') ok('Unknown glyphs map to space'); else bad('Unknown glyph not mapped to space');
       const fmtTag = String.fromCharCode(dv.getUint8(12),dv.getUint8(13),dv.getUint8(14),dv.getUint8(15));
       const dataTag = String.fromCharCode(dv.getUint8(36),dv.getUint8(37),dv.getUint8(38),dv.getUint8(39));
       if (fmtTag==='fmt ' && dataTag==='data') ok('fmt/data chunks present'); else bad('fmt/data chunks missing');
-      // Estimator sanity check
-      const framesTest = buildBaudotFramesFromText('TEST' + CR + LF);
-      const est = (function(){
-        let bitUnits=0; for (const f of framesTest){ if (f.type==='hold') bitUnits+= (f.sec||0)*45.45; else if (f.type==='char') bitUnits += 1+5+1.5+(f.guardBits||0); }
-        return Math.ceil(bitUnits * (48000/45.45) * 1.002);
-      })();
-      if (est>0 && Number.isFinite(est)) ok('Estimator returns finite positive'); else bad('Estimator returned invalid');
+
+      // new tests: header builder + streaming
+      const h = makeWavHeader(48000, 48000*60);
+      if (new DataView(h).getUint32(40, true) === 48000*60*2) ok('makeWavHeader data size correct'); else bad('makeWavHeader size wrong');
+      let chunks = 0; const framesTest = buildBaudotFramesFromText('TEST' + CR + LF);
+      afskStream(framesTest, { baud:45.45, mark:2125, space:2295, stopBits:1.5, sampleRate:48000 }, (i16)=>{ chunks++; });
+      if (chunks>0) ok('afskStream emitted chunks'); else bad('afskStream emitted no chunks');
     }catch(e){ bad('Exception in tests: '+(e.message||e)); }
     els.testLog.style.display='block';
     els.testLog.textContent = log.join('\n');
