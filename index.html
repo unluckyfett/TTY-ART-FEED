@@ -73,6 +73,20 @@
     <span class="muted">Views and opinions expressed in the sourced artwork are those of the original creators and do not necessarily reflect my views. I do not endorse or take responsibility for any messages, symbols, or depictions shown.</span>
   </div>
 
+  <!-- About & Instructions -->
+  <div id="about" class="card" style="margin:12px">
+    <h2 style="margin:0 0 6px">About & Instructions</h2>
+    <p style="margin:6px 0 10px; color:var(--ink)">I built this to make it easy to preview and stream <b>vintage RTTY/TTY art</b> as AFSK audio for hardware TTY gear or software decoders, and to help preserve and share this slice of computing/radio history. All artwork is sourced from the excellent <a href="http://artscene.textfiles.com/rtty/COLLECTION/" target="_blank" rel="noopener">TEXTFILES.COM Artscene RTTY Collection</a> — huge credit to the collectors and curators who archived it.</p>
+    <ol style="margin:0 0 10px 18px; padding:0; color:var(--muted)">
+      <li>Choose an <b>Art set</b> and <b>Content filter</b> (SFW excludes 04/07/08 and anything in your <code>nsfw_list.json</code>).</li>
+      <li>Set AFSK params: <b>Baud</b>, <b>Mark</b>, <b>Space</b>, <b>Stop bits</b>. Default is 45.45 baud, 2125/2295 Hz, 1.5 stop bits.</li>
+      <li>Optionally set a <b>Mark lead‑in</b> (sec) to wake auto‑start decoders before each piece.</li>
+      <li>Pick how many items to include, the <b>gap</b> (minutes) between pieces, and the <b>time limits</b> / <b>split</b> size (minutes per WAV).</li>
+      <li>Click <b>Build WAV</b>. A preview of each piece appears on the right; downloads for each segment show below the player.</li>
+    </ol>
+    <p class="muted" style="margin:0">Advanced: place your bundled files under <code>rtty_offline/</code> with a <code>manifest.json</code> of paths like <code>ARTWORK-01/000</code>. Add a manual NSFW override list at <code>rtty_offline/nsfw_list.json</code> (JSON array or newline list). This project is unaffiliated with the archive and is provided for educational/historic purposes.</p>
+  </div>
+
   <div id="nsfwModal" class="modal" aria-hidden="true" role="dialog" aria-modal="true">
     <div class="modal-card">
       <h3 style="margin:0 0 8px">NSFW content</h3>
@@ -771,17 +785,3 @@
       // Hold-mark should generate about 1 second of samples at 48k
       var nHold = afskStream([{type:'hold', sec:1}], { baud:45.45, mark:2125, space:2295, stopBits:1.5, sampleRate:48000 }, function(){});
       if (nHold > 44000 && nHold < 52000) ok('Hold-mark ~1s produced '+nHold+' samples'); else bad('Hold-mark length off: '+nHold);
-      // parseNsfwList newline and JSON tests
-      var mapTxt = parseNsfwList('ARTWORK-01/123\nARTWORK-02/045\n');
-      if (mapTxt['ARTWORK-01/123'] && mapTxt['ARTWORK-02/045']) ok('parseNsfwList handles newline list'); else bad('parseNsfwList newline parse failed');
-      var mapJson = parseNsfwList('["ARTWORK-03/001","ARTWORK-05/222"]');
-      if (mapJson['ARTWORK-03/001'] && mapJson['ARTWORK-05/222']) ok('parseNsfwList handles JSON array'); else bad('parseNsfwList JSON parse failed');
-    }catch(e){ bad('Exception in tests: '+(e.message||e)); }
-    els.testLog.style.display='block';
-    els.testLog.textContent = log.join('\n');
-  }
-  els.testBtn.addEventListener('click', runTests);
-})();
-</script>
-</body>
-</html>
