@@ -374,6 +374,32 @@
     }
   };
 
+  // Guard/timing constants for frame builder
+  const GUARD_SHIFT_BITS = 0.0, GUARD_CR_BITS = 0.0, GUARD_LF_BITS = 0.0, LINE_LEAD_MS = 0, START_LEAD_MS = 0;
+
+  // Build ITA2 (Baudot) frames from normalized text
+  function buildBaudotFramesFromText(text){
+    const frames=[]; let currentShift=null; let lastWasCR=false;
+    // Minimal initial sync
+    frames.push({type:'char', code: BAUDOT_TABLE.LTRS[CR], guardBits: GUARD_CR_BITS});
+    frames.push({type:'char', code: BAUDOT_TABLE.LTRS[LF], guardBits: GUARD_LF_BITS});
+    frames.push({type:'char', code: LTRS, guardBits: GUARD_SHIFT_BITS});
+    if (START_LEAD_MS>0) frames.push({type:'hold', sec: START_LEAD_MS/1000});
+    for (const raw of text){
+      const ch = normalizeChar(raw);
+      if (ch===CR){ frames.push({type:'char', code: BAUDOT_TABLE.LTRS[CR], guardBits: GUARD_CR_BITS}); lastWasCR=true; continue; }
+      if (ch===LF){ if (!lastWasCR) frames.push({type:'char', code: BAUDOT_TABLE.LTRS[CR], guardBits: GUARD_CR_BITS}); frames.push({type:'char', code: BAUDOT_TABLE.LTRS[LF], guardBits: GUARD_LF_BITS}); lastWasCR=false; if (LINE_LEAD_MS>0) frames.push({type:'hold', sec: LINE_LEAD_MS/1000}); continue; }
+      lastWasCR=false; let needed=null;
+      if (ch in BAUDOT_TABLE.LTRS) needed='LTRS'; else if (ch in BAUDOT_TABLE.FIGS) needed='FIGS'; else continue;
+      if (needed!==currentShift){ frames.push({type:'char', code: (needed==='LTRS'?LTRS:FIGS), guardBits: GUARD_SHIFT_BITS}); currentShift=needed; }
+      frames.push({type:'char', code: BAUDOT_TABLE[needed][ch]});
+    }
+    if (currentShift!=='LTRS') frames.push({type:'char', code: LTRS, guardBits: GUARD_SHIFT_BITS});
+    frames.push({type:'char', code: BAUDOT_TABLE.LTRS[CR], guardBits: GUARD_CR_BITS});
+    frames.push({type:'char', code: BAUDOT_TABLE.LTRS[LF], guardBits: GUARD_LF_BITS});
+    return frames;
+  }
+
   const DEFAULT_STRETCH = 1.002;
 
   // Sample rate helper (prefers AudioContext, falls back to 48 kHz)
