@@ -68,7 +68,7 @@
 
   <div id="disclaimer" class="disclaimer" role="note" aria-live="polite">
     <button id="discClose" class="close" aria-label="Dismiss disclaimer">✕</button>
-    <strong>Disclaimer:</strong> This app aggregates vintage RTTY art from third‑party sources. Some pieces may be insensitive or politically incorrect. I’ve done my best to filter NSFW, but there are no guarantees; viewer discretion is advised. None of the opinions expressed or implied are my own.
+    <strong>Disclaimer:</strong> This app aggregates vintage RTTY art from third‑party sources. Some pieces may be insensitive or politically incorrect. I’ve done my best to filter NSFW, but there are no guarantees; viewer discretion is advised.
     <br/>
     <span class="muted">Views and opinions expressed in the sourced artwork are those of the original creators and do not necessarily reflect my views. I do not endorse or take responsibility for any messages, symbols, or depictions shown.</span>
   </div>
@@ -239,9 +239,14 @@
   };
   var setStatus = function(s){ els.status.textContent = s; };
 
-  // ====== Disclaimer banner (dismiss + persist) ======
-  try{ if (localStorage.getItem('discDismissed') === '1'){ var d0 = document.getElementById('disclaimer'); if (d0) d0.style.display = 'none'; } }catch(e){}
-  (function(){ var d = document.getElementById('disclaimer'); var b = document.getElementById('discClose'); if (b){ b.addEventListener('click', function(){ if (d) d.style.display='none'; try{ localStorage.setItem('discDismissed','1'); }catch(e){} }); } })();
+  // ====== Disclaimer banner (always show on refresh; no persistence) ======
+  (function(){
+    var d = document.getElementById('disclaimer');
+    var b = document.getElementById('discClose');
+    if (b){ b.addEventListener('click', function(){ if (d) d.style.display='none'; }); }
+    // Ensure visible on load in case it was previously hidden
+    if (d) d.style.display = '';
+  })();
 
   // ====== Preview builder ======
   function renderPreviews(picks){
