@@ -219,6 +219,7 @@
   const CR = String.fromCharCode(13);
   const LF = String.fromCharCode(10);
   function normalizeCRLF(s){
+    // Replace bare CR with CRLF; leave existing CRLF intact.
     const re = new RegExp(CR + '(?!' + LF + ')', 'g');
     return (s || '').replace(re, CR + LF);
   }
@@ -431,7 +432,7 @@
 
       const sr = getSampleRate();
       const silence = new Float32Array(Math.max(0, Math.round(sr * gapSec))); // pure silence gap
-            const pcm = [];
+      const pcm = [];
       // hard caps to avoid huge allocations / "Invalid array length" errors
       const MAX_TOTAL_SAMPLES = 60_000_000;   // ~20.8 min @ 48kHz
       const MAX_ITEM_SAMPLES  = 12_000_000;   // ~4.2  min @ 48kHz per artwork
@@ -454,7 +455,7 @@
       };
 
       let used = 0;
-      for (let i=0;i<picks.length;i++){
+      for (let i=0; i<picks.length; i++){
         setStatus(`Fetching ${i+1}/${picks.length}… ${picks[i].dir}/${picks[i].filename}`);
         let raw="";
         if (els.dataSource.value === 'bundled') raw = await fetchArtTextBundled(picks[i].pagePath);
@@ -477,16 +478,6 @@
         }
 
         // Generate and store
-        const sig = afskFromFrames(frames, { baud: baud, mark: mark, space: space, stopBits: stopB, sampleRate: sr });
-        if (sig.length){ pcm.push(new Float32Array(sig)); used++; }
-        if (gapSec > 0 && i < picks.length - 1) pcm.push(silence);
-      }/${picks.length}… ${picks[i].dir}/${picks[i].filename}`);
-        let raw="";
-        if (els.dataSource.value === 'bundled') raw = await fetchArtTextBundled(picks[i].pagePath);
-        else raw = await fetchArtTextRemote(picks[i].pagePath);
-        if (!raw || !raw.trim()) continue; // skip empties
-        const text = normalizeText(raw);    // FULL TEXT
-        const frames = buildBaudotFramesFromText(text);
         const sig = afskFromFrames(frames, { baud: baud, mark: mark, space: space, stopBits: stopB, sampleRate: sr });
         if (sig.length){ pcm.push(new Float32Array(sig)); used++; }
         if (gapSec > 0 && i < picks.length - 1) pcm.push(silence);
@@ -555,7 +546,7 @@
       const fmtTag = String.fromCharCode(dv.getUint8(12),dv.getUint8(13),dv.getUint8(14),dv.getUint8(15));
       const dataTag = String.fromCharCode(dv.getUint8(36),dv.getUint8(37),dv.getUint8(38),dv.getUint8(39));
       if (fmtTag==='fmt ' && dataTag==='data') ok('fmt/data chunks present'); else bad('fmt/data chunks missing');
-      // NEW: estimator sanity
+      // Estimator sanity check
       const framesTest = buildBaudotFramesFromText('TEST' + CR + LF);
       const est = (function(){
         let bitUnits=0; for (const f of framesTest){ if (f.type==='hold') bitUnits+= (f.sec||0)*45.45; else if (f.type==='char') bitUnits += 1+5+1.5+(f.guardBits||0); }
@@ -564,8 +555,7 @@
       if (est>0 && Number.isFinite(est)) ok('Estimator returns finite positive'); else bad('Estimator returned invalid');
     }catch(e){ bad('Exception in tests: '+(e.message||e)); }
     els.testLog.style.display='block';
-    els.testLog.textContent = log.join('
-');
+    els.testLog.textContent = log.join('\n');
   }
   els.testBtn.addEventListener('click', runTests);
 })();
