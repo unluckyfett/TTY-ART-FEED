@@ -25,12 +25,29 @@
     .muted { color:var(--muted); }
     .links a{ display:inline-block; margin:6px 8px 0 0; }
     pre.testlog { background:#0b0c10; color:#c4d2ff; padding:10px; border-radius:10px; border:1px dashed #2a3040; max-height:32vh; overflow:auto; }
+
+    /* NSFW modal */
+    .modal{ position:fixed; inset:0; background:rgba(0,0,0,0.6); display:none; align-items:center; justify-content:center; z-index:9999; }
+    .modal.show{ display:flex; }
+    .modal-card{ background:var(--panel); border:1px solid #2a3040; border-radius:14px; padding:16px; width:min(560px,90vw); box-shadow:0 10px 30px rgba(0,0,0,.5); }
+    .modal .actions{ display:flex; justify-content:flex-end; gap:8px; margin-top:12px; }
   </style>
 </head>
 <body>
   <header>
     <h1>RTTY Art WAV Builder</h1>
   </header>
+
+  <div id="nsfwModal" class="modal" aria-hidden="true" role="dialog" aria-modal="true">
+    <div class="modal-card">
+      <h3 style="margin:0 0 8px">NSFW content</h3>
+      <p class="muted">NSFW mode may include nudity or adult content from ARTWORK-04, ARTWORK-07, and ARTWORK-08. Continue?</p>
+      <div class="actions">
+        <button id="nsfwCancel">Cancel</button>
+        <button id="nsfwEnable" class="primary">Enable NSFW</button>
+      </div>
+    </div>
+  </div>
 
   <div class="wrap">
     <div class="card">
@@ -43,6 +60,17 @@
           <label>Gap between pieces (min)</label>
           <input id="gap" type="number" value="2" min="0" step="0.1" />
         </div>
+      </div>
+
+      <div class="row">
+        <div>
+          <label>Content filter</label>
+          <select id="nsfwMode">
+            <option value="sfw" selected>SFW (exclude ARTWORK-04, -07, -08)</option>
+            <option value="nsfw">NSFW (includes all collections)</option>
+          </select>
+        </div>
+        <div></div>
       </div>
 
       <div class="row">
@@ -105,21 +133,28 @@
   </div>
 
 <script>
-(() => {
+(function(){
   'use strict';
 
+  /* ---- Minimal Set polyfill for tests (if needed) ---- */
+  if (typeof window.Set === 'undefined'){
+    window.Set = function(arr){ this._m = {}; if (arr){ for (var i=0;i<arr.length;i++){ this._m[arr[i]] = true; } } }; 
+    window.Set.prototype.add = function(v){ this._m[v]=true; return this; };
+    window.Set.prototype.has = function(v){ return !!this._m[v]; };
+  }
+
   // ====== Surface runtime errors ======
-  addEventListener('error', (e) => {
-    const el = document.getElementById('status');
+  addEventListener('error', function(e){
+    var el = document.getElementById('status');
     if (el) el.textContent = 'JS error: ' + (e.message || (e.error && e.error.message) || e);
   });
-  addEventListener('unhandledrejection', (e) => {
-    const el = document.getElementById('status');
+  addEventListener('unhandledrejection', function(e){
+    var el = document.getElementById('status');
     if (el) el.textContent = 'Promise error: ' + (e.reason && (e.reason.message||e.reason));
   });
 
   // ====== UI refs ======
-  const els = {
+  var els = {
     buildBtn: document.getElementById('buildBtn'),
     status: document.getElementById('status'),
     player: document.getElementById('player'),
@@ -134,128 +169,176 @@
     gap: document.getElementById('gap'),
     testBtn: document.getElementById('testBtn'),
     testLog: document.getElementById('testLog'),
+    nsfwMode: document.getElementById('nsfwMode'),
+    nsfwModal: document.getElementById('nsfwModal'),
+    nsfwEnable: document.getElementById('nsfwEnable'),
+    nsfwCancel: document.getElementById('nsfwCancel')
   };
-  const setStatus = s => els.status.textContent = s;
+  var setStatus = function(s){ els.status.textContent = s; };
+
+  // ====== NSFW toggle (custom modal) ======
+  (function(){
+    var sel = els.nsfwMode;
+    var modal = els.nsfwModal, btnOk = els.nsfwEnable, btnCancel = els.nsfwCancel;
+    function showModal(){ modal.classList.add('show'); modal.setAttribute('aria-hidden','false'); }
+    function hideModal(){ modal.classList.remove('show'); modal.setAttribute('aria-hidden','true'); }
+    sel.addEventListener('change', function(){ if (sel.value === 'nsfw'){ showModal(); } });
+    btnCancel.addEventListener('click', function(){ hideModal(); sel.value = 'sfw'; });
+    btnOk.addEventListener('click', function(){ hideModal(); /* keep nsfw */ });
+    modal.addEventListener('click', function(e){ if (e.target === modal){ hideModal(); sel.value = 'sfw'; } });
+    document.addEventListener('keydown', function(e){ if (e.key === 'Escape' && modal.classList.contains('show')){ hideModal(); sel.value='sfw'; } });
+  })();
 
   // ====== Bundled manifest (no remote/proxy UI) ======
-  const MANIFEST_URL = 'rtty_offline/manifest.json';
-  const bundled = { base:'', items:[], loaded:false };
+  var MANIFEST_URL = 'rtty_offline/manifest.json';
+  var bundled = { base:'', items:[], loaded:false };
 
   function deriveBaseFromUrl(url){
-    const slash = url.lastIndexOf('/');
+    var slash = url.lastIndexOf('/');
     return slash >= 0 ? url.slice(0, slash) : '';
   }
 
-  async function loadManifest(){
-    try{
-      const url = MANIFEST_URL;
-      const res = await fetch(url, { cache:'no-cache' });
-      if (!res.ok) throw new Error('HTTP '+res.status);
-      const json = await res.json();
-      let base='', items=[];
-      if (Array.isArray(json)){
-        items = json.slice();
-        base = deriveBaseFromUrl(url);
-      } else if (json && Array.isArray(json.items)){
-        items = json.items.slice();
-        base = (json.base || '').trim() || deriveBaseFromUrl(url);
-      } else {
-        for (const [dir, arr] of Object.entries(json||{})){
-          if (Array.isArray(arr)) for (const f of arr) items.push(`${dir}/${f}`);
+  function loadManifest(){
+    return fetch(MANIFEST_URL, { cache:'no-cache' })
+      .then(function(res){ if(!res.ok) throw new Error('HTTP '+res.status); return res.json(); })
+      .then(function(json){
+        var base='', items=[];
+        if (Array.isArray(json)){
+          items = json.slice();
+          base = deriveBaseFromUrl(MANIFEST_URL);
+        } else if (json && Array.isArray(json.items)){
+          items = json.items.slice();
+          base = (json.base || '').trim() || deriveBaseFromUrl(MANIFEST_URL);
+        } else {
+          for (var k in (json||{})){
+            if (!Object.prototype.hasOwnProperty.call(json,k)) continue;
+            var arr = json[k];
+            if (Array.isArray(arr)) for (var i=0;i<arr.length;i++) items.push(k + '/' + arr[i]);
+          }
+          base = (json.base || '').trim() || deriveBaseFromUrl(MANIFEST_URL);
         }
-        base = (json.base || '').trim() || deriveBaseFromUrl(url);
+        items = items.filter(function(x){ return /^(ARTWORK-0[1-8])\/([0-9]{3})$/.test(x); });
+        if (!items.length) throw new Error('manifest had no valid items');
+        bundled.base = base; bundled.items = items; bundled.loaded = true; return true;
+      })
+      .catch(function(e){ bundled.base=''; bundled.items=[]; bundled.loaded=false; setStatus('manifest load failed: '+(e.message||e)); return false; });
+  }
+
+  function fetchArtTextBundled(rel){
+    var url = (bundled.base ? (bundled.base + '/') : '') + rel;
+    return fetch(url, { cache:'no-cache' })
+      .then(function(r){ return r.ok ? r.text() : ''; })
+      .then(function(txt){ return normalizeCRLF(txt); })
+      .catch(function(){ return ''; });
+  }
+
+  function isSfwAllowed(x){ return !(x.indexOf('ARTWORK-04/')===0 || x.indexOf('ARTWORK-07/')===0 || x.indexOf('ARTWORK-08/')===0); }
+
+  function sampleRandomArt(n){
+    function pick(){
+      var mode = (els.nsfwMode && els.nsfwMode.value) || 'sfw';
+      var pool = bundled.items.slice();
+      if (mode !== 'nsfw'){
+        pool = pool.filter(isSfwAllowed);
       }
-      items = items.filter(x => /^(ARTWORK-0[1-8])\/([0-9]{3})$/.test(x));
-      if (!items.length) throw new Error('manifest had no valid items');
-      bundled.base = base; bundled.items = items; bundled.loaded = true;
-      return true;
-    }catch(e){
-      bundled.base = ''; bundled.items = []; bundled.loaded = false;
-      setStatus('manifest load failed: ' + (e.message||e));
-      return false;
+      if (!pool.length) return [];
+      var seen = Object.create(null);
+      var out = []; var attempts=0, maxAttempts=n*20;
+      while (out.length<n && attempts++<maxAttempts){
+        var item = pool[Math.floor(Math.random()*pool.length)];
+        if (seen[item]) continue; seen[item] = 1;
+        var parts = item.split('/');
+        out.push({ dir: parts[0], filename: parts[1], pagePath: item });
+      }
+      return out;
     }
-  }
-
-  async function fetchArtTextBundled(rel){
-    try{
-      const url = (bundled.base ? (bundled.base + '/') : '') + rel;
-      const r = await fetch(url, { cache:'no-cache' });
-      if (!r.ok) return '';
-      const txt = await r.text();
-      return normalizeCRLF(txt);
-    }catch{ return ''; }
-  }
-
-  async function sampleRandomArt(n){
-    if (!bundled.loaded){ const ok = await loadManifest(); if (!ok) return []; }
-    const seen = new Set();
-    const out = []; let attempts=0, maxAttempts=n*20;
-    while (out.length<n && attempts++<maxAttempts){
-      const item = bundled.items[Math.floor(Math.random()*bundled.items.length)];
-      if (seen.has(item)) continue; seen.add(item);
-      const [dir, file] = item.split('/');
-      out.push({ dir, filename:file, pagePath:item });
+    if (!bundled.loaded){
+      return loadManifest().then(function(ok){ return ok ? pick() : []; });
     }
-    return out;
+    return Promise.resolve(pick());
   }
 
   // ====== Newline helpers ======
-  const CR = String.fromCharCode(13);
-  const LF = String.fromCharCode(10);
+  var CR = String.fromCharCode(13);
+  var LF = String.fromCharCode(10);
   function normalizeCRLF(s){
     // Replace bare CR with CRLF; leave existing CRLF intact.
-    const re = new RegExp(CR + '(?!' + LF + ')', 'g');
+    var re = new RegExp(CR + '(?!' + LF + ')', 'g');
     return (s || '').replace(re, CR + LF);
   }
 
   // ====== BAUDOT / AFSK ======
-  const printableSet = "#ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:;.,-'()/&$?! ";
-  const replacementMap = {
-    '"':"'", '=':'-', '*':'X', '_':'-', '@':'A', '%':'O',
-    '[':'(', ']':')', '{':'(', '}':')', [String.fromCharCode(92)]:'/', '^':'-', '|':'/',
-    '`':"'", '~':'-', '<':'(', '>':')'
-  };
-  const normalizeChar = ch => {
+  var printableSet = "#ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:;.,-'()/&$?! ";
+  var replacementMap = (function(){
+    var m = {
+      '"':"'", '=':'-', '*':'X', '_':'-', '@':'A', '%':'O',
+      '[':'(', ']':')', '{':'(', '}':')', '^':'-', '|':'/',
+      '`':"'", '~':'-', '<':'(', '>':')'
+    };
+    m[String.fromCharCode(92)] = '/'; // backslash
+    return m;
+  })();
+  function normalizeChar(ch){
     if (ch === CR || ch === LF) return ch; // keep CR/LF
-    const u = ch.toUpperCase();
-    const safe = replacementMap[u] || replacementMap[ch] || u;
-    return printableSet.includes(safe) ? safe : ' ';
-  };
-  const normalizeText = s => [...s].map(normalizeChar).join('');
-
-  const LTRS = 0b11111, FIGS = 0b11011;
-  const BAUDOT_TABLE = {
-    LTRS: {
-      'A':0b00011,'B':0b11001,'C':0b01110,'D':0b01001,'E':0b00001,'F':0b01101,'G':0b11010,'H':0b10100,
-      'I':0b00110,'J':0b01011,'K':0b01111,'L':0b10010,'M':0b11100,'N':0b01100,'O':0b11000,'P':0b10110,
-      'Q':0b10111,'R':0b01010,'S':0b00101,'T':0b10000,'U':0b00111,'V':0b11110,'W':0b10011,'X':0b11101,
-      'Y':0b10101,'Z':0b10001,[CR]:0b01000,[LF]:0b00010,' ':0b00100
-    },
-    FIGS: {
-      '-':0b00011,'?':0b11001,':':0b01110,'$':0b01001,'3':0b00001,'!':0b01101,'&':0b11010,'#':0b10100,
-      '8':0b00110,"'":0b01011,'(':0b01111,')':0b10010,'.':0b11100,',':0b01100,'9':0b11000,'0':0b10110,
-      '1':0b10111,'4':0b01010,'Bell':0b00101,'5':0b10000,'7':0b00111,';':0b11110,'2':0b10011,'/':0b11101,
-      '6':0b10101,'+':0b10001,[CR]:0b01000,[LF]:0b00010,' ':0b00100
+    var u = (ch||'').toUpperCase();
+    var safe = replacementMap[u] || replacementMap[ch] || u;
+    return printableSet.indexOf(safe) !== -1 ? safe : ' ';
+  }
+  function splitByCodePoint(s){
+    var out=[], i=0, n = s ? s.length : 0;
+    for (; i<n; i++){
+      var c = s.charCodeAt(i);
+      if (c>=0xD800 && c<=0xDBFF && i+1<n){
+        var c2 = s.charCodeAt(i+1);
+        if (c2>=0xDC00 && c2<=0xDFFF){ out.push(s.substr(i,2)); i++; continue; }
+      }
+      out.push(s.charAt(i));
     }
-  };
+    return out;
+  }
+  function normalizeText(s){
+    var arr = splitByCodePoint(s || '');
+    for (var i=0;i<arr.length;i++){ arr[i] = normalizeChar(arr[i]); }
+    return arr.join('');
+  }
+
+  // Use decimals (ES5-safe) for ITA2 codes
+  var LTRS = 31, FIGS = 27; // 0b11111, 0b11011
+  var BAUDOT_TABLE = { LTRS: {}, FIGS: {} };
+  // LTRS
+  BAUDOT_TABLE.LTRS['A']=3;  BAUDOT_TABLE.LTRS['B']=25; BAUDOT_TABLE.LTRS['C']=14; BAUDOT_TABLE.LTRS['D']=9;  BAUDOT_TABLE.LTRS['E']=1;
+  BAUDOT_TABLE.LTRS['F']=13; BAUDOT_TABLE.LTRS['G']=26; BAUDOT_TABLE.LTRS['H']=20; BAUDOT_TABLE.LTRS['I']=6;  BAUDOT_TABLE.LTRS['J']=11;
+  BAUDOT_TABLE.LTRS['K']=15; BAUDOT_TABLE.LTRS['L']=18; BAUDOT_TABLE.LTRS['M']=28; BAUDOT_TABLE.LTRS['N']=12; BAUDOT_TABLE.LTRS['O']=24;
+  BAUDOT_TABLE.LTRS['P']=22; BAUDOT_TABLE.LTRS['Q']=23; BAUDOT_TABLE.LTRS['R']=10; BAUDOT_TABLE.LTRS['S']=5;  BAUDOT_TABLE.LTRS['T']=16;
+  BAUDOT_TABLE.LTRS['U']=7;  BAUDOT_TABLE.LTRS['V']=30; BAUDOT_TABLE.LTRS['W']=19; BAUDOT_TABLE.LTRS['X']=29; BAUDOT_TABLE.LTRS['Y']=21;
+  BAUDOT_TABLE.LTRS['Z']=17; BAUDOT_TABLE.LTRS[CR]=8;  BAUDOT_TABLE.LTRS[LF]=2;  BAUDOT_TABLE.LTRS[' ']=4;
+  // FIGS
+  BAUDOT_TABLE.FIGS['-']=3;  BAUDOT_TABLE.FIGS['?']=25; BAUDOT_TABLE.FIGS[':']=14; BAUDOT_TABLE.FIGS['$']=9;  BAUDOT_TABLE.FIGS['3']=1;
+  BAUDOT_TABLE.FIGS['!']=13; BAUDOT_TABLE.FIGS['&']=26; BAUDOT_TABLE.FIGS['#']=20; BAUDOT_TABLE.FIGS['8']=6;  BAUDOT_TABLE.FIGS["'"]=11;
+  BAUDOT_TABLE.FIGS['(']=15; BAUDOT_TABLE.FIGS[')']=18; BAUDOT_TABLE.FIGS['.']=28; BAUDOT_TABLE.FIGS[',']=12; BAUDOT_TABLE.FIGS['9']=24;
+  BAUDOT_TABLE.FIGS['0']=22; BAUDOT_TABLE.FIGS['1']=23; BAUDOT_TABLE.FIGS['4']=10; BAUDOT_TABLE.FIGS['Bell']=5; BAUDOT_TABLE.FIGS['5']=16;
+  BAUDOT_TABLE.FIGS['7']=7;  BAUDOT_TABLE.FIGS[';']=30; BAUDOT_TABLE.FIGS['2']=19; BAUDOT_TABLE.FIGS['/']=29; BAUDOT_TABLE.FIGS['6']=21;
+  BAUDOT_TABLE.FIGS['+']=17; BAUDOT_TABLE.FIGS[CR]=8; BAUDOT_TABLE.FIGS[LF]=2; BAUDOT_TABLE.FIGS[' ']=4;
 
   // Guard/timing constants for frame builder
-  const GUARD_SHIFT_BITS = 0.0, GUARD_CR_BITS = 0.0, GUARD_LF_BITS = 0.0, LINE_LEAD_MS = 0, START_LEAD_MS = 0;
+  var GUARD_SHIFT_BITS = 0.0, GUARD_CR_BITS = 0.0, GUARD_LF_BITS = 0.0, LINE_LEAD_MS = 0, START_LEAD_MS = 0;
 
   // Build ITA2 (Baudot) frames from normalized text
   function buildBaudotFramesFromText(text){
-    const frames=[]; let currentShift=null; let lastWasCR=false;
+    var frames=[]; var currentShift=null; var lastWasCR=false;
     // Minimal initial sync
     frames.push({type:'char', code: BAUDOT_TABLE.LTRS[CR], guardBits: GUARD_CR_BITS});
     frames.push({type:'char', code: BAUDOT_TABLE.LTRS[LF], guardBits: GUARD_LF_BITS});
     frames.push({type:'char', code: LTRS, guardBits: GUARD_SHIFT_BITS});
     if (START_LEAD_MS>0) frames.push({type:'hold', sec: START_LEAD_MS/1000});
-    for (const raw of text){
-      const ch = normalizeChar(raw);
+    var t = text || '';
+    for (var idx=0; idx < t.length; idx++){
+      var raw = t.charAt(idx);
+      var ch = normalizeChar(raw);
       if (ch===CR){ frames.push({type:'char', code: BAUDOT_TABLE.LTRS[CR], guardBits: GUARD_CR_BITS}); lastWasCR=true; continue; }
       if (ch===LF){ if (!lastWasCR) frames.push({type:'char', code: BAUDOT_TABLE.LTRS[CR], guardBits: GUARD_CR_BITS}); frames.push({type:'char', code: BAUDOT_TABLE.LTRS[LF], guardBits: GUARD_LF_BITS}); lastWasCR=false; if (LINE_LEAD_MS>0) frames.push({type:'hold', sec: LINE_LEAD_MS/1000}); continue; }
-      lastWasCR=false; let needed=null;
-      if (ch in BAUDOT_TABLE.LTRS) needed='LTRS'; else if (ch in BAUDOT_TABLE.FIGS) needed='FIGS'; else continue;
+      lastWasCR=false; var needed=null;
+      if (Object.prototype.hasOwnProperty.call(BAUDOT_TABLE.LTRS, ch)) needed='LTRS'; else if (Object.prototype.hasOwnProperty.call(BAUDOT_TABLE.FIGS, ch)) needed='FIGS'; else continue;
       if (needed!==currentShift){ frames.push({type:'char', code: (needed==='LTRS'?LTRS:FIGS), guardBits: GUARD_SHIFT_BITS}); currentShift=needed; }
       frames.push({type:'char', code: BAUDOT_TABLE[needed][ch]});
     }
@@ -265,17 +348,17 @@
     return frames;
   }
 
-  const DEFAULT_STRETCH = 1.002;
+  var DEFAULT_STRETCH = 1.002;
 
   // Sample rate helper (prefers AudioContext, falls back to 48 kHz)
-  let audioCtx;
+  var audioCtx;
   function getSampleRate(){
     try{
       if (!audioCtx){
-        const Ctx = window.AudioContext || window.webkitAudioContext;
+        var Ctx = window.AudioContext || window.webkitAudioContext;
         if (Ctx) audioCtx = new Ctx();
       }
-      const sr = audioCtx && (audioCtx.sampleRate|0);
+      var sr = audioCtx && (audioCtx.sampleRate|0);
       if (sr && sr>=8000 && sr<=192000) return sr;
     }catch(e){}
     return 48000;
@@ -283,23 +366,24 @@
 
   // Streamed AFSK generator -> Int16 chunks
   function afskStream(frames, opts, onChunk){
-    const { baud, mark, space, stopBits, sampleRate, stretch = DEFAULT_STRETCH } = opts;
-    const twoPi = 2*Math.PI; const spbF = (sampleRate/baud)*stretch; let carry=0, phase=0;
-    const BLOCK = 16384; let block = new Int16Array(BLOCK); let bi = 0; let total = 0;
-    const pushSample = (s) => { block[bi++] = s; if (bi === block.length){ onChunk(block); block = new Int16Array(BLOCK); bi = 0; } total++; };
-    const flush = () => { if (bi>0){ onChunk(block.slice(0,bi)); bi = 0; } };
-    const emit = (freq, bitUnits) => {
-      let want = Math.floor(spbF*bitUnits + carry); carry = spbF*bitUnits + carry - want;
-      const inc = twoPi*freq/sampleRate;
-      for (let i=0;i<want;i++){
-        const f = Math.sin(phase); phase += inc; if (phase>=twoPi) phase -= twoPi;
-        const s = (f<=1? (f>=-1? f : -1) : 1) * 32767; pushSample(s|0);
+    var baud = opts.baud, mark = opts.mark, space = opts.space, stopBits = opts.stopBits, sampleRate = opts.sampleRate, stretch = (opts.stretch==null?DEFAULT_STRETCH:opts.stretch);
+    var twoPi = 2*Math.PI; var spbF = (sampleRate/baud)*stretch; var carry=0, phase=0;
+    var BLOCK = 16384; var block = new Int16Array(BLOCK); var bi = 0; var total = 0;
+    function pushSample(s){ block[bi++] = s; if (bi === block.length){ onChunk(block); block = new Int16Array(BLOCK); bi = 0; } total++; }
+    function flush(){ if (bi>0){ onChunk(block.slice(0,bi)); bi = 0; } }
+    function emit(freq, bitUnits){
+      var wantF = spbF*bitUnits + carry; var want = Math.floor(wantF); carry = wantF - want;
+      var inc = twoPi*freq/sampleRate;
+      for (var i=0;i<want;i++){
+        var f = Math.sin(phase); phase += inc; if (phase>=twoPi) phase -= twoPi;
+        var s = (f<=1? (f>=-1? f : -1) : 1) * 32767; pushSample(s|0);
       }
-    };
-    for (const f of frames){
+    }
+    for (var j=0;j<frames.length;j++){
+      var f = frames[j];
       if (f.type==='hold'){ emit(mark, (f.sec||0)*baud); continue; }
       if (f.type==='char'){
-        const code=f.code & 0x1F; emit(space,1); for (let i=0;i<5;i++){ const bit=(code>>i)&1; emit(bit?mark:space,1);} emit(mark, stopBits); if (f.guardBits&&f.guardBits>0) emit(mark, f.guardBits);
+        var code=f.code & 0x1F; emit(space,1); for (var k=0;k<5;k++){ var bit=(code>>k)&1; emit(bit?mark:space,1);} emit(mark, stopBits); if (f.guardBits&&f.guardBits>0) emit(mark, f.guardBits);
       }
     }
     emit(mark,2.0); flush(); return total;
@@ -307,10 +391,10 @@
 
   // WAV header builder (16-bit PCM mono)
   function makeWavHeader(sampleRate, sampleCount){
-    const dataBytes = sampleCount * 2 >>> 0; // modulo 2^32 per RIFF
-    const riffSize = (36 + dataBytes) >>> 0;
-    const buffer = new ArrayBuffer(44); const view = new DataView(buffer);
-    const putStr=(o,s)=>{ for(let i=0;i<s.length;i++) view.setUint8(o+i, s.charCodeAt(i)); };
+    var dataBytes = (sampleCount * 2) >>> 0; // modulo 2^32 per RIFF
+    var riffSize = (36 + dataBytes) >>> 0;
+    var buffer = new ArrayBuffer(44); var view = new DataView(buffer);
+    function putStr(o,s){ for(var i=0;i<s.length;i++) view.setUint8(o+i, s.charCodeAt(i)); }
     putStr(0,'RIFF'); view.setUint32(4, riffSize, true);
     putStr(8,'WAVE'); putStr(12,'fmt '); view.setUint32(16,16,true);
     view.setUint16(20,1,true); view.setUint16(22,1,true);
@@ -320,204 +404,219 @@
     return buffer;
   }
 
-  // ====== Build many WAVs (splitting by minutes / WAV limit) ======
-  els.buildBtn.addEventListener('click', async () => {
-    try{
-      els.buildBtn.disabled = true; els.downloadWrap.innerHTML = ''; els.player.src = '';
-      const n = Math.max(1, Math.min(500, parseInt(els.count.value||'25',10)));
-      const gapMin = Math.max(0, parseFloat(els.gap.value||'2'));
-      const gapSec = gapMin * 60;
+  function pad2(n){ return (n<10?'0':'') + n; }
 
-      setStatus('Sampling artwork…');
-      const picks = await sampleRandomArt(n);
-      if (!picks.length){ setStatus('No items to process'); return; }
+  // ====== Build many WAVs (splitting by minutes / WAV limit) ======
+  els.buildBtn.addEventListener('click', function(){
+    els.buildBtn.disabled = true; els.downloadWrap.innerHTML = ''; els.player.src = '';
+    var n = Math.max(1, Math.min(500, parseInt(els.count.value||'25',10)));
+    var gapMin = Math.max(0, parseFloat(els.gap.value||'2'));
+    var gapSec = gapMin * 60;
+
+    setStatus('Sampling artwork…');
+    sampleRandomArt(n).then(function(picks){
+      if (!picks.length){ setStatus('No items to process'); els.buildBtn.disabled=false; return; }
 
       // show list
-      els.list.innerHTML = picks.map(p=>{
-        const href = bundled.base ? `${bundled.base}/${p.pagePath}` : p.pagePath;
-        return `<li><a href="${href}" target="_blank" rel="noopener">${p.dir}/${p.filename}</a></li>`;
-      }).join('');
-      els.countInfo.textContent = `(${picks.length})`;
+      var html = '';
+      for (var i=0;i<picks.length;i++){
+        var p = picks[i];
+        var href = bundled.base ? (bundled.base + '/' + p.pagePath) : p.pagePath;
+        html += '<li><a href="'+href+'" target="_blank" rel="noopener">'+p.dir+'/'+p.filename+'</a></li>';
+      }
+      els.list.innerHTML = html; els.countInfo.textContent = '('+picks.length+')';
 
       // params
-      const baud  = parseFloat(els.baud.value||'45.45');
-      const stopB = parseFloat(els.stopBits.value||'1.5');
-      const mark  = parseFloat(els.mark.value||'2125');
-      const space = parseFloat(els.space.value||'2295');
-      const sr = getSampleRate();
+      var baud  = parseFloat(els.baud.value||'45.45');
+      var stopB = parseFloat(els.stopBits.value||'1.5');
+      var mark  = parseFloat(els.mark.value||'2125');
+      var space = parseFloat(els.space.value||'2295');
+      var sr = getSampleRate();
 
-      const maxItemMin = Math.max(0, parseFloat(document.getElementById('maxMinItem').value||'0'));
-      const maxTotalMin = Math.max(1, parseFloat(document.getElementById('maxMinTotal').value||'1440'));
-      const splitMin = Math.max(1, parseFloat(document.getElementById('splitMin').value||'1440'));
+      var maxItemMin = Math.max(0, parseFloat(document.getElementById('maxMinItem').value||'0'));
+      var maxTotalMin = Math.max(1, parseFloat(document.getElementById('maxMinTotal').value||'1440'));
+      var splitMin = Math.max(1, parseFloat(document.getElementById('splitMin').value||'1440'));
 
-      const PER_ITEM_LIMIT = maxItemMin>0 ? Math.floor(sr*60*maxItemMin) : Number.POSITIVE_INFINITY;
-      const OVERALL_LIMIT  = Math.floor(sr*60*maxTotalMin);
-      const WAV_BYTES_LIMIT = 0xFFFFFFFF - 8; // RIFF safety margin
-      const SEG_LIMIT_BY_SPLIT = Math.floor(sr*60*splitMin);
-      const SEG_LIMIT_BY_WAV = Math.floor(WAV_BYTES_LIMIT/2);
-      const SEG_LIMIT = Math.min(SEG_LIMIT_BY_SPLIT, SEG_LIMIT_BY_WAV);
+      var PER_ITEM_LIMIT = maxItemMin>0 ? Math.floor(sr*60*maxItemMin) : Number.POSITIVE_INFINITY;
+      var OVERALL_LIMIT  = Math.floor(sr*60*maxTotalMin);
+      var WAV_BYTES_LIMIT = 0xFFFFFFFF - 8; // RIFF safety margin
+      var SEG_LIMIT_BY_SPLIT = Math.floor(sr*60*splitMin);
+      var SEG_LIMIT_BY_WAV = Math.floor(WAV_BYTES_LIMIT/2);
+      var SEG_LIMIT = Math.min(SEG_LIMIT_BY_SPLIT, SEG_LIMIT_BY_WAV);
 
       // diagnostics
-      const stats = { empties:0, tooLongSkipped:0, tooLongStreamed:0, stoppedOverall:false, segments:0 };
+      var stats = { empties:0, tooLongSkipped:0, tooLongStreamed:0, stoppedOverall:false, segments:0 };
 
       // segment accumulators
-      let segChunks = []; // Uint8Array pieces (PCM)
-      let segSamples = 0; let segIndex = 1; let overallSamples = 0;
-      const openNewSegment = () => { segChunks = []; segSamples = 0; };
-      const flushSegment = () => {
+      var segChunks = []; // Uint8Array pieces (PCM)
+      var segSamples = 0; var segIndex = 1; var overallSamples = 0;
+      function openNewSegment(){ segChunks = []; segSamples = 0; }
+      function flushSegment(){
         if (segSamples <= 0) return null;
-        const header = makeWavHeader(sr, segSamples);
-        const blob = new Blob([header, ...segChunks], { type:'audio/wav' });
-        const url = URL.createObjectURL(blob);
-        const minutes = (segSamples/sr)/60;
-        const a = document.createElement('a');
-        a.href = url; a.download = `rtty_art_seg${String(segIndex).padStart(2,'0')}.wav`;
-        a.textContent = `Download WAV (seg ${segIndex}, ~${minutes.toFixed(1)} min)`;
+        var header = makeWavHeader(sr, segSamples);
+        var blob = new Blob([header].concat(segChunks), { type:'audio/wav' });
+        var url = URL.createObjectURL(blob);
+        var minutes = (segSamples/sr)/60;
+        var a = document.createElement('a');
+        a.href = url; a.download = 'rtty_art_seg'+pad2(segIndex)+'.wav';
+        a.textContent = 'Download WAV (seg '+segIndex+', ~'+minutes.toFixed(1)+' min)';
         els.downloadWrap.appendChild(a);
         stats.segments++;
         if (segIndex === 1){ els.player.src = url; els.player.load(); }
         segIndex++;
         return url;
-      };
+      }
       openNewSegment();
 
-      const pushPCM = (int16Arr) => {
-        let off = 0;
+      function pushPCM(int16Arr){
+        var off = 0;
         while (off < int16Arr.length){
-          const room = SEG_LIMIT - segSamples;
+          var room = SEG_LIMIT - segSamples;
           if (room <= 0){ flushSegment(); openNewSegment(); continue; }
-          const take = Math.min(room, int16Arr.length - off);
-          const view = new Uint8Array(int16Arr.buffer, int16Arr.byteOffset + off*2, take*2);
-          const copy = new Uint8Array(take*2); copy.set(view);
+          var take = Math.min(room, int16Arr.length - off);
+          var view = new Uint8Array(int16Arr.buffer, int16Arr.byteOffset + off*2, take*2);
+          var copy = new Uint8Array(take*2); copy.set(view);
           segChunks.push(copy);
           segSamples += take; overallSamples += take; off += take;
           if (overallSamples >= OVERALL_LIMIT){ stats.stoppedOverall = true; return false; }
         }
         return true;
-      };
+      }
 
-      const emitSilence = async(samples) => {
-        const BLOCK = 16384;
-        while (samples > 0){
-          const take = Math.min(samples, BLOCK);
-          const zeros = new Int16Array(take);
-          if (!pushPCM(zeros)) return false;
-          samples -= take;
-        }
-        return true;
-      };
+      function emitSilence(samples){
+        return new Promise(function(resolve){
+          var BLOCK = 16384;
+          while (samples > 0){
+            var take = Math.min(samples, BLOCK);
+            var zeros = new Int16Array(take);
+            if (!pushPCM(zeros)) { resolve(false); return; }
+            samples -= take;
+          }
+          resolve(true);
+        });
+      }
 
       // estimator (for optional skipping only)
-      const spb = (sr / baud) * DEFAULT_STRETCH;
-      const estimateSamples = (frames) => {
-        let bitUnits = 0;
-        for (const f of frames){
+      var spb = (sr / baud) * DEFAULT_STRETCH;
+      function estimateSamples(frames){
+        var bitUnits = 0;
+        for (var a=0;a<frames.length;a++){
+          var f = frames[a];
           if (f.type === 'hold') { bitUnits += (f.sec||0) * baud; continue; }
           if (f.type === 'char') { bitUnits += 1 + 5 + stopB + (f.guardBits||0); }
         }
-        const est = Math.ceil(bitUnits * spb);
-        return Number.isFinite(est) && est > 0 ? est : 0;
-      };
+        var est = Math.ceil(bitUnits * spb);
+        return (isFinite(est) && est > 0) ? est : 0;
+      }
 
-      // process items
-      let used = 0;
-      for (let i=0; i<picks.length; i++){
-        setStatus(`Fetching ${i+1}/${picks.length}… ${picks[i].dir}/${picks[i].filename}`);
-        const raw = await fetchArtTextBundled(picks[i].pagePath);
-        if (!raw || !raw.trim()){ stats.empties++; continue; }
-        const text = normalizeText(raw);
-        const frames = buildBaudotFramesFromText(text);
+      // sequential processor
+      var i = 0, used = 0;
+      function processNext(){
+        if (i >= picks.length){ done(); return; }
+        setStatus('Fetching '+(i+1)+'/'+picks.length+'… '+picks[i].dir+'/'+picks[i].filename);
+        fetchArtTextBundled(picks[i].pagePath).then(function(raw){
+          if (!raw || !raw.trim()){ stats.empties++; i++; processNext(); return; }
+          var text = normalizeText(raw);
+          var frames = buildBaudotFramesFromText(text);
+          var est = estimateSamples(frames);
+          if (PER_ITEM_LIMIT !== Number.POSITIVE_INFINITY && est>PER_ITEM_LIMIT){ stats.tooLongSkipped++; i++; processNext(); return; }
+          if (est>SEG_LIMIT){ stats.tooLongStreamed++; /* split across files */ }
+          afskStream(frames, { baud:baud, mark:mark, space:space, stopBits:stopB, sampleRate:sr }, function(i16){ pushPCM(i16); });
+          used++;
+          if ((gapSec>0) && (i<picks.length-1)){
+            var gapSamp = Math.max(0, Math.round(sr * gapSec));
+            emitSilence(gapSamp).then(function(cont){ if (!cont){ done(); return; } i++; processNext(); });
+          } else { i++; processNext(); }
+        }).catch(function(){ i++; processNext(); });
+      }
 
-        const est = estimateSamples(frames);
-        if (PER_ITEM_LIMIT !== Number.POSITIVE_INFINITY && est>PER_ITEM_LIMIT){ stats.tooLongSkipped++; continue; }
-        if (est>SEG_LIMIT){ stats.tooLongStreamed++; /* will split across files */ }
-
-        afskStream(frames, { baud, mark, space, stopBits: stopB, sampleRate: sr }, (i16) => { pushPCM(i16); });
-        used++;
-
-        if ((gapSec>0) && (i<picks.length-1)){
-          const gapSamp = Math.max(0, Math.round(sr * gapSec));
-          if (!(await emitSilence(gapSamp))) break;
+      function done(){
+        flushSegment();
+        if (!used){
+          var msg = 'No items added.';
+          msg += ' empties:'+stats.empties;
+          msg += ' skippedByPerItem:'+stats.tooLongSkipped;
+          msg += ' splitItems:'+stats.tooLongStreamed;
+          if (stats.stoppedOverall) msg += ' (hit OVERALL minutes cap)';
+          msg += '. Adjust limits or count.';
+          setStatus(msg);
+          els.buildBtn.disabled = false;
+          return;
         }
-        if (stats.stoppedOverall) break;
+        var totalMin = (overallSamples/sr)/60;
+        var note = stats.stoppedOverall ? ' · hit overall cap' : '';
+        setStatus('Ready · segments: '+stats.segments+' · items: '+used+' · total ~ '+totalMin.toFixed(1)+' min'+note);
+        els.buildBtn.disabled = false;
       }
 
-      // finalize
-      flushSegment();
-      if (!used){
-        let msg = 'No items added.';
-        msg += ` empties:${stats.empties}`;
-        msg += ` skippedByPerItem:${stats.tooLongSkipped}`;
-        msg += ` splitItems:${stats.tooLongStreamed}`;
-        if (stats.stoppedOverall) msg += ' (hit OVERALL minutes cap)';
-        msg += '. Adjust limits or count.';
-        setStatus(msg);
-        return;
-      }
-
-      const totalMin = (overallSamples/sr)/60;
-      const note = stats.stoppedOverall ? ' · hit overall cap' : '';
-      setStatus(`Ready · segments: ${stats.segments} · items: ${used} · total ~ ${totalMin.toFixed(1)} min${note}`);
-
-    }catch(e){ console.error(e); setStatus('Error: ' + (e.message||e)); }
-    finally{ els.buildBtn.disabled = false; }
+      processNext();
+    });
   });
 
   // ====== Self-tests ======
   function encodeWav(samples, sampleRate){ // kept for tests only
-    const buffer = new ArrayBuffer(44 + samples.length*2); const view = new DataView(buffer);
-    const putStr=(o,s)=>{ for(let i=0;i<s.length;i++) view.setUint8(o+i, s.charCodeAt(i)); };
+    var buffer = new ArrayBuffer(44 + samples.length*2); var view = new DataView(buffer);
+    function putStr(o,s){ for(var i=0;i<s.length;i++) view.setUint8(o+i, s.charCodeAt(i)); }
     putStr(0,'RIFF'); view.setUint32(4, 36 + samples.length*2, true);
     putStr(8,'WAVE'); putStr(12,'fmt '); view.setUint32(16,16,true);
     view.setUint16(20,1,true); view.setUint16(22,1,true);
     view.setUint32(24,sampleRate,true); view.setUint32(28,sampleRate*2,true);
     view.setUint16(32,2,true); view.setUint16(34,16,true);
     putStr(36,'data'); view.setUint32(40, samples.length*2, true);
-    for(let i=0;i<samples.length;i++){
-      const s=Math.max(-1,Math.min(1,samples[i]))*32767; view.setInt16(44+i*2, s|0, true);
+    for(var i=0;i<samples.length;i++){
+      var s=Math.max(-1,Math.min(1,samples[i]))*32767; view.setInt16(44+i*2, s|0, true);
     }
     return buffer;
   }
 
   function runTests(){
-    const log=[]; const ok=(m)=>log.push('✅ '+m); const bad=(m)=>log.push('❌ '+m);
+    var log=[]; var ok=function(m){log.push('✅ '+m);}; var bad=function(m){log.push('❌ '+m);};
     try{
-      const tCRLF = normalizeText('A' + CR + LF + 'B');
+      var tCRLF = normalizeText('A' + CR + LF + 'B');
       if (tCRLF.indexOf('A' + CR + LF + 'B') !== -1) ok('CRLF preserved by normalizeText'); else bad('CRLF not preserved');
-      const tSlash = normalizeText('X' + String.fromCharCode(92) + 'Y');
-      if (tSlash.includes('X/Y')) ok('Backslash mapped to slash'); else bad('Backslash mapping failed');
-      const sample = normalizeText('~@%{}[]|^*');
-      const expect = '-AO()()/-X';
+      var tSlash = normalizeText('X' + String.fromCharCode(92) + 'Y');
+      if (tSlash.indexOf('X/Y')!==-1) ok('Backslash mapped to slash'); else bad('Backslash mapping failed');
+      var sample = normalizeText('~@%{}[]|^*');
+      var expect = '-AO()()/-X';
       if (sample === expect) ok('Replacement map correct'); else bad('Replacement map wrong: ' + sample + ' != ' + expect);
-      const allowed = new Set((printableSet + CR + LF).split(''));
-      if ([...sample].every(ch => allowed.has(ch))) ok('normalizeText emits only allowed chars'); else bad('normalizeText emitted disallowed chars');
-      if (BAUDOT_TABLE.LTRS['A']===0b00011) ok('BAUDOT LTRS A'); else bad('BAUDOT LTRS A wrong');
+      var allowed = new Set((printableSet + CR + LF).split(''));
+      if ([].every.call(sample, function(ch){ return allowed.has(ch); })) ok('normalizeText emits only allowed chars'); else bad('normalizeText emitted disallowed chars');
+      if (BAUDOT_TABLE.LTRS['A']===3) ok('BAUDOT LTRS A'); else bad('BAUDOT LTRS A wrong');
       if ('1' in BAUDOT_TABLE.FIGS) ok('BAUDOT FIGS 1 present'); else bad('BAUDOT FIGS 1 missing');
-      const frames = buildBaudotFramesFromText('HI' + CR + LF);
+      var frames = buildBaudotFramesFromText('HI' + CR + LF);
       if (frames.length>=10) ok('Frames built'); else bad('Frames too short');
-      const fNums = buildBaudotFramesFromText('12' + CR + LF);
-      const sawFIGS = fNums.some(f => f.type==='char' && f.code===FIGS);
+      var fNums = buildBaudotFramesFromText('12' + CR + LF);
+      var sawFIGS = false; for (var z=0; z<fNums.length; z++){ if (fNums[z].type==='char' && fNums[z].code===FIGS){ sawFIGS = true; break; } }
       if (sawFIGS) ok('FIGS shift emitted for digits'); else bad('FIGS shift not emitted for digits');
-      const sig = (function(){ const arr = []; const twoPi=2*Math.PI; let ph=0; const inc=twoPi*100/48000; for(let i=0;i<1000;i++){ arr.push(Math.sin(ph)); ph+=inc; } return arr; })();
-      const wav = encodeWav(new Float32Array(sig), 48000);
-      const dv = new DataView(wav);
-      const tag = String.fromCharCode(dv.getUint8(0),dv.getUint8(1),dv.getUint8(2),dv.getUint8(3));
-      const wave = String.fromCharCode(dv.getUint8(8),dv.getUint8(9),dv.getUint8(10),dv.getUint8(11));
+      var sig = (function(){ var arr = []; var twoPi=2*Math.PI; var ph=0; var inc=twoPi*100/48000; for(var i=0;i<1000;i++){ arr.push(Math.sin(ph)); ph+=inc; } return arr; })();
+      var wav = encodeWav(new Float32Array(sig), 48000);
+      var dv = new DataView(wav);
+      var tag = String.fromCharCode(dv.getUint8(0),dv.getUint8(1),dv.getUint8(2),dv.getUint8(3));
+      var wave = String.fromCharCode(dv.getUint8(8),dv.getUint8(9),dv.getUint8(10),dv.getUint8(11));
       if (tag==='RIFF' && wave==='WAVE') ok('WAV header OK'); else bad('WAV header incorrect');
-      const crOnly = 'LINE1' + CR + 'LINE2' + CR; const crlf = normalizeCRLF(crOnly);
-      if (crlf.endsWith('LINE2' + CR + LF)) ok('normalizeCRLF converts CR to CRLF'); else bad('normalizeCRLF did not convert CR to CRLF');
-      const wav0 = encodeWav(new Float32Array(), 48000); if (wav0.byteLength === 44) ok('Zero-length WAV header is 44 bytes'); else bad('Zero-length WAV header wrong size');
-      const keep = 'A' + CR + LF + 'B'; if (normalizeCRLF(keep) === keep) ok('normalizeCRLF leaves CRLF intact'); else bad('normalizeCRLF altered existing CRLF');
-      const unknown = normalizeText('🙂'); if (unknown === ' ') ok('Unknown glyphs map to space'); else bad('Unknown glyph not mapped to space');
-      const fmtTag = String.fromCharCode(dv.getUint8(12),dv.getUint8(13),dv.getUint8(14),dv.getUint8(15));
-      const dataTag = String.fromCharCode(dv.getUint8(36),dv.getUint8(37),dv.getUint8(38),dv.getUint8(39));
+      var crOnly = 'LINE1' + CR + 'LINE2' + CR; var crlf = normalizeCRLF(crOnly);
+      if (crlf.slice(-2)===CR+LF) ok('normalizeCRLF converts CR to CRLF'); else bad('normalizeCRLF did not convert CR to CRLF');
+      var wav0 = encodeWav(new Float32Array(), 48000); if (wav0.byteLength === 44) ok('Zero-length WAV header is 44 bytes'); else bad('Zero-length WAV header wrong size');
+      var keep = 'A' + CR + LF + 'B'; if (normalizeCRLF(keep) === keep) ok('normalizeCRLF leaves CRLF intact'); else bad('normalizeCRLF altered existing CRLF');
+      var unknown = normalizeText('🙂'); if (unknown === ' ') ok('Unknown glyphs map to space'); else bad('Unknown glyph not mapped to space');
+      var swOk = (!isSfwAllowed('ARTWORK-04/000') && !isSfwAllowed('ARTWORK-07/000') && !isSfwAllowed('ARTWORK-08/000') && isSfwAllowed('ARTWORK-03/123'));
+      if (swOk) ok('SFW filter excludes 04,07,08'); else bad('SFW filter failed');
+      var fmtTag = String.fromCharCode(dv.getUint8(12),dv.getUint8(13),dv.getUint8(14),dv.getUint8(15));
+      var dataTag = String.fromCharCode(dv.getUint8(36),dv.getUint8(37),dv.getUint8(38),dv.getUint8(39));
       if (fmtTag==='fmt ' && dataTag==='data') ok('fmt/data chunks present'); else bad('fmt/data chunks missing');
-      const h = makeWavHeader(48000, 48000*60);
+      var h = makeWavHeader(48000, 48000*60);
       if (new DataView(h).getUint32(40, true) === 48000*60*2) ok('makeWavHeader data size correct'); else bad('makeWavHeader size wrong');
-      let chunks = 0; const framesTest = buildBaudotFramesFromText('TEST' + CR + LF);
-      afskStream(framesTest, { baud:45.45, mark:2125, space:2295, stopBits:1.5, sampleRate:48000 }, ()=>{ chunks++; });
+      var chunks = 0; var framesTest = buildBaudotFramesFromText('TEST' + CR + LF);
+      afskStream(framesTest, { baud:45.45, mark:2125, space:2295, stopBits:1.5, sampleRate:48000 }, function(){ chunks++; });
       if (chunks>0) ok('afskStream emitted chunks'); else bad('afskStream emitted no chunks');
-      const srTest = getSampleRate(); if (srTest>=8000 && srTest<=192000) ok('getSampleRate sane: '+srTest); else bad('getSampleRate out of range: '+srTest);
+      var srTest = getSampleRate(); if (srTest>=8000 && srTest<=192000) ok('getSampleRate sane: '+srTest); else bad('getSampleRate out of range: '+srTest);
+      // CR before LF injection test
+      var onlyLF = buildBaudotFramesFromText('X' + LF + 'Y');
+      var hasCRBeforeLF = false;
+      for (var t=0;t<onlyLF.length-1;t++){
+        if (onlyLF[t].type==='char' && onlyLF[t].code===BAUDOT_TABLE.LTRS[CR] && onlyLF[t+1].type==='char' && onlyLF[t+1].code===BAUDOT_TABLE.LTRS[LF]){ hasCRBeforeLF = true; break; }
+      }
+      if (hasCRBeforeLF) ok('CR injected before LF'); else bad('CR not injected before LF');
     }catch(e){ bad('Exception in tests: '+(e.message||e)); }
     els.testLog.style.display='block';
     els.testLog.textContent = log.join('\n');
