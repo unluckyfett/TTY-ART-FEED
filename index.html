@@ -75,6 +75,24 @@
 
       <div class="row">
         <div>
+          <label>Art set</label>
+          <select id="artSet">
+            <option value="all" selected>All (01–08)</option>
+            <option value="cartoons">Cartoons (ARTWORK-01)</option>
+            <option value="sports_portraits">Sports &amp; Portraits (ARTWORK-02)</option>
+            <option value="holidays">Holidays (ARTWORK-03)</option>
+            <option value="nsfw_women">NSFW Women (ARTWORK-04)</option>
+            <option value="symbols_buildings_scouts_homilies">Symbols, Buildings, Scouts, Homilies (ARTWORK-05)</option>
+            <option value="space_flags_slogans_portraits">Space, Flags, Slogans, Portraits (ARTWORK-06)</option>
+            <option value="characters_pinups_slogans_starwars">Characters, Pinups, Slogans, Star Wars (ARTWORK-07)</option>
+            <option value="characters_space_slogans">Characters, Space, Slogans (ARTWORK-08)</option>
+          </select>
+        </div>
+        <div></div>
+      </div>
+
+      <div class="row">
+        <div>
           <label>Content filter</label>
           <select id="nsfwMode">
             <option value="sfw" selected>SFW (exclude ARTWORK-04, -07, -08)</option>
@@ -184,7 +202,8 @@
     nsfwMode: document.getElementById('nsfwMode'),
     nsfwModal: document.getElementById('nsfwModal'),
     nsfwEnable: document.getElementById('nsfwEnable'),
-    nsfwCancel: document.getElementById('nsfwCancel')
+    nsfwCancel: document.getElementById('nsfwCancel'),
+    artSet: document.getElementById('artSet')
   };
   var setStatus = function(s){ els.status.textContent = s; };
 
@@ -264,15 +283,81 @@
       .catch(function(){ return ''; });
   }
 
-  function isSfwAllowed(x){ return !(x.indexOf('ARTWORK-04/')===0 || x.indexOf('ARTWORK-07/')===0 || x.indexOf('ARTWORK-08/')===0); }
+  var NSFW_LIST_URL = 'rtty_offline/nsfw_list.json'; // optional JSON or newline list of ARTWORK-xx/nnn
+  var nsfwOverrides = { map: Object.create(null), loaded:false };
+  function parseNsfwList(txt){
+    if (!txt) return Object.create(null);
+    var arr = [];
+    try { var j = JSON.parse(txt); if (Array.isArray(j)) arr = j; } catch(e){ arr = txt.split(/
+?
+/); }
+    var m = Object.create(null);
+    for (var i=0;i<arr.length;i++){
+      var s = (arr[i]||'').trim();
+      if (!s) continue;
+      if (!/^(ARTWORK-0[1-8])\/([0-9]{3})$/.test(s)) continue;
+      m[s] = 1;
+    }
+    return m;
+  }
+  function loadNsfwOverrides(){
+    return fetch(NSFW_LIST_URL, { cache:'no-cache' })
+      .then(function(res){ if(!res.ok) throw new Error('http '+res.status); return res.text(); })
+      .then(function(txt){ nsfwOverrides.map = parseNsfwList(txt); nsfwOverrides.loaded=true; return true; })
+      .catch(function(){ nsfwOverrides.map = Object.create(null); nsfwOverrides.loaded=true; return false; });
+  }
+  function isSfwAllowed(x){
+    if (nsfwOverrides.map && nsfwOverrides.map[x]) return false; // explicit overrides
+    return !(x.indexOf('ARTWORK-04/')===0 || x.indexOf('ARTWORK-07/')===0 || x.indexOf('ARTWORK-08/')===0);
+  }
+
+  function isInSelectedSet(x){
+    var v = (els.artSet && els.artSet.value) || 'all';
+    if (v === 'all') return true;
+    var map = {
+      cartoons:'ARTWORK-01/',
+      sports_portraits:'ARTWORK-02/',
+      holidays:'ARTWORK-03/',
+      nsfw_women:'ARTWORK-04/',
+      symbols_buildings_scouts_homilies:'ARTWORK-05/',
+      space_flags_slogans_portraits:'ARTWORK-06/',
+      characters_pinups_slogans_starwars:'ARTWORK-07/',
+      characters_space_slogans:'ARTWORK-08/'
+    };
+    var pre = map[v];
+    return pre ? x.indexOf(pre)===0 : true;
+  }
+
+  function ensureLoaded(){
+    var p = Promise.resolve(true);
+    if (!bundled.loaded) p = p.then(loadManifest); else p = p.then(function(){ return true; });
+    return p.then(function(ok){ if (!ok) return false; if (!nsfwOverrides.loaded) return loadNsfwOverrides().then(function(){return true;}); return true; });
+  }
 
   function sampleRandomArt(n){
     function pick(){
       var mode = (els.nsfwMode && els.nsfwMode.value) || 'sfw';
       var pool = bundled.items.slice();
+      pool = pool.filter(isInSelectedSet);
       if (mode !== 'nsfw'){
         pool = pool.filter(isSfwAllowed);
       }
+      if (!pool.length) return [];
+      var seen = Object.create(null);
+      var out = []; var attempts=0, maxAttempts=n*20;
+      while (out.length<n && attempts++<maxAttempts){
+        var item = pool[Math.floor(Math.random()*pool.length)];
+        if (seen[item]) continue; seen[item] = 1;
+        var parts = item.split('/');
+        out.push({ dir: parts[0], filename: parts[1], pagePath: item });
+      }
+      return out;
+    }
+    if (!bundled.loaded || !nsfwOverrides.loaded){
+      return ensureLoaded().then(function(ok){ return ok ? pick() : []; });
+    }
+    return Promise.resolve(pick());
+  }
       if (!pool.length) return [];
       var seen = Object.create(null);
       var out = []; var attempts=0, maxAttempts=n*20;
@@ -632,6 +717,15 @@
       var unknown = normalizeText('🙂'); if (unknown === ' ') ok('Unknown glyphs map to space'); else bad('Unknown glyph not mapped to space');
       var swOk = (!isSfwAllowed('ARTWORK-04/000') && !isSfwAllowed('ARTWORK-07/000') && !isSfwAllowed('ARTWORK-08/000') && isSfwAllowed('ARTWORK-03/123'));
       if (swOk) ok('SFW filter excludes 04,07,08'); else bad('SFW filter failed');
+      // Art set filter test
+      var prevSet = els.artSet ? els.artSet.value : 'all';
+      if (els.artSet){ els.artSet.value = 'cartoons'; }
+      if (isInSelectedSet('ARTWORK-01/000') && !isInSelectedSet('ARTWORK-02/000')) ok('Art set filter works'); else bad('Art set filter broken');
+      if (els.artSet){ els.artSet.value = prevSet; }
+      // NSFW overrides test
+      nsfwOverrides.map['ARTWORK-01/123'] = 1;
+      if (!isSfwAllowed('ARTWORK-01/123')) ok('NSFW overrides honored'); else bad('NSFW overrides ignored');
+      delete nsfwOverrides.map['ARTWORK-01/123'];
       var fmtTag = String.fromCharCode(dv.getUint8(12),dv.getUint8(13),dv.getUint8(14),dv.getUint8(15));
       var dataTag = String.fromCharCode(dv.getUint8(36),dv.getUint8(37),dv.getUint8(38),dv.getUint8(39));
       if (fmtTag==='fmt ' && dataTag==='data') ok('fmt/data chunks present'); else bad('fmt/data chunks missing');
