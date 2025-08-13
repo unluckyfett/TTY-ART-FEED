@@ -376,6 +376,20 @@
 
   const DEFAULT_STRETCH = 1.002;
 
+  // Sample rate helper (prefers AudioContext, falls back to 48 kHz)
+  let audioCtx;
+  function getSampleRate(){
+    try{
+      if (!audioCtx){
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        if (Ctx) audioCtx = new Ctx();
+      }
+      const sr = audioCtx && (audioCtx.sampleRate|0);
+      if (sr && sr>=8000 && sr<=192000) return sr;
+    }catch(e){ /* ignore and fall back */ }
+    return 48000;
+  }
+
   // Streamed AFSK generator -> Int16 chunks
   function afskStream(frames, opts, onChunk){
     const { baud, mark, space, stopBits, sampleRate, stretch = DEFAULT_STRETCH } = opts;
@@ -634,6 +648,8 @@
       let chunks = 0; const framesTest = buildBaudotFramesFromText('TEST' + CR + LF);
       afskStream(framesTest, { baud:45.45, mark:2125, space:2295, stopBits:1.5, sampleRate:48000 }, (i16)=>{ chunks++; });
       if (chunks>0) ok('afskStream emitted chunks'); else bad('afskStream emitted no chunks');
+      const srTest = getSampleRate();
+      if (srTest>=8000 && srTest<=192000) ok('getSampleRate sane: '+srTest); else bad('getSampleRate out of range: '+srTest);
     }catch(e){ bad('Exception in tests: '+(e.message||e)); }
     els.testLog.style.display='block';
     els.testLog.textContent = log.join('\n');
