@@ -19,14 +19,12 @@
     button.primary { background:var(--accent); color:#0b0c10; border-color:#2c3e89; font-weight:600; }
     button:disabled { opacity:.6; cursor:not-allowed; }
     .row { display:grid; grid-template-columns: 1fr 1fr; gap:8px; margin-bottom:8px; }
-    .row3 { display:grid; grid-template-columns: 1fr 1fr 1fr; gap:8px; margin-bottom:8px; }
     .status { color:var(--muted); font-size:12px; margin-top:6px; min-height:18px; }
     .list { max-height:48vh; overflow:auto; border-top:1px dashed #2a3040; margin-top:8px; padding-top:8px; }
     audio { width:100%; margin-top:10px; }
     .muted { color:var(--muted); }
-    .inline { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-    pre.testlog { background:#0b0c10; color:#c4d2ff; padding:10px; border-radius:10px; border:1px dashed #2a3040; max-height:32vh; overflow:auto; }
     .links a{ display:inline-block; margin:6px 8px 0 0; }
+    pre.testlog { background:#0b0c10; color:#c4d2ff; padding:10px; border-radius:10px; border:1px dashed #2a3040; max-height:32vh; overflow:auto; }
   </style>
 </head>
 <body>
@@ -38,31 +36,16 @@
     <div class="card">
       <div class="row">
         <div>
-          <label>Data source</label>
-          <select id="dataSource">
-            <option value="remote" selected>Remote (textfiles proxy)</option>
-            <option value="bundled">Bundled (manifest in repo)</option>
-          </select>
-        </div>
-        <div>
           <label>Count (artworks)</label>
           <input id="count" type="number" value="25" min="1" max="500" />
         </div>
-      </div>
-
-      <div id="bundledControls" class="inline" style="display:none">
-        <div style="flex:1 1 260px; min-width:240px;">
-          <label>Manifest URL (relative)</label>
-          <input id="manifestUrl" type="text" value="rtty_offline/manifest.json" />
-        </div>
         <div>
-          <label>&nbsp;</label>
-          <button id="loadManifestBtn">Load manifest</button>
+          <label>Gap between pieces (min)</label>
+          <input id="gap" type="number" value="2" min="0" step="0.1" />
         </div>
-        <div class="muted" id="manifestStatus">not loaded</div>
       </div>
 
-      <div class="row" style="margin-top:8px;">
+      <div class="row">
         <div>
           <label>Baud Rate</label>
           <input id="baudRate" type="number" value="45.45" step="0.01" />
@@ -82,36 +65,25 @@
           <input id="spaceFreq" type="number" value="2295" />
         </div>
       </div>
+
       <div class="row">
         <div>
-          <label>Gap between pieces (sec)</label>
-          <input id="gap" type="number" value="2" min="0" step="0.1" />
+          <label>Max minutes / item (0 = no per-item limit; may split mid‑piece)</label>
+          <input id="maxMinItem" type="number" value="0" min="0" step="0.5" />
+        </div>
+        <div>
+          <label>Max minutes total</label>
+          <input id="maxMinTotal" type="number" value="1440" min="1" step="1" />
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>Split every (minutes per file)</label>
+          <input id="splitMin" type="number" value="1440" min="1" step="1" />
         </div>
         <div>
           <label>&nbsp;</label>
           <button id="buildBtn" class="primary" style="width:100%">Build WAV</button>
-        </div>
-      </div>
-
-      <div class="row">
-        <div>
-          <label>Max minutes / item (0 = no limit, may split mid‑piece)</label>
-          <input id="maxMinItem" type="number" value="0" min="0" step="0.5" />
-        </div>
-        <div>
-          <label>Max minutes total (stops run when reached)</label>
-          <input id="maxMinTotal" type="number" value="60" min="1" step="1" />
-        </div>
-      </div>
-
-      <div class="row">
-        <div>
-          <label>Split every (minutes per file)</label>
-          <input id="splitMin" type="number" value="30" min="1" step="1" />
-        </div>
-        <div>
-          <label>&nbsp;</label>
-          <div class="muted">Large jobs become multiple WAVs; first one loads in the player.</div>
         </div>
       </div>
 
@@ -121,7 +93,7 @@
 
       <div style="margin-top:8px; display:flex; gap:8px; align-items:center;">
         <button id="testBtn">Run self-test</button>
-        <span class="muted">(verifies Baudot, AFSK, and WAV header)</span>
+        <span class="muted">(verifies Baudot, AFSK, streaming & WAV header)</span>
       </div>
       <pre id="testLog" class="testlog" style="display:none"></pre>
     </div>
@@ -136,36 +108,17 @@
 (() => {
   'use strict';
 
-  // ====== Surface runtime errors in the status line ======
-  window.addEventListener('error', (e) => {
+  // ====== Surface runtime errors ======
+  addEventListener('error', (e) => {
     const el = document.getElementById('status');
     if (el) el.textContent = 'JS error: ' + (e.message || (e.error && e.error.message) || e);
   });
-  window.addEventListener('unhandledrejection', (e) => {
+  addEventListener('unhandledrejection', (e) => {
     const el = document.getElementById('status');
     if (el) el.textContent = 'Promise error: ' + (e.reason && (e.reason.message||e.reason));
   });
 
-  // ====== Remote source (CORS-safe via proxies) ======
-  const ORIGIN = "https://artscene.textfiles.com/rtty/COLLECTION/";
-  const FIXED_DIRS = Array.from({length:8}, (_,i)=>`ARTWORK-0${i+1}/`);
-  const PROXIES = [
-    "https://r.jina.ai/https://artscene.textfiles.com/rtty/COLLECTION/",
-    "https://r.jina.ai/http://artscene.textfiles.com/rtty/COLLECTION/"
-  ];
-  async function fetchFromAny(path=""){
-    let lastErr;
-    for (const base of PROXIES){
-      try{
-        const r = await fetch(base + path, { cache:"reload" });
-        if (!r.ok) continue;
-        return await r.text();
-      }catch(e){ lastErr = e; }
-    }
-    throw lastErr || new Error("fetch failed");
-  }
-
-  // ====== UI ======
+  // ====== UI refs ======
   const els = {
     buildBtn: document.getElementById('buildBtn'),
     status: document.getElementById('status'),
@@ -181,26 +134,12 @@
     gap: document.getElementById('gap'),
     testBtn: document.getElementById('testBtn'),
     testLog: document.getElementById('testLog'),
-    dataSource: document.getElementById('dataSource'),
-    bundledControls: document.getElementById('bundledControls'),
-    manifestUrl: document.getElementById('manifestUrl'),
-    loadManifestBtn: document.getElementById('loadManifestBtn'),
-    manifestStatus: document.getElementById('manifestStatus'),
-    maxMinItem: document.getElementById('maxMinItem'),
-    maxMinTotal: document.getElementById('maxMinTotal'),
-    splitMin: document.getElementById('splitMin'),
   };
   const setStatus = s => els.status.textContent = s;
 
-  // ====== Bundled state ======
-  const bundled = { base:"", items:[], loaded:false };
-
-  function toggleBundledUI(){
-    const mode = els.dataSource.value;
-    els.bundledControls.style.display = (mode === 'bundled') ? 'flex' : 'none';
-  }
-  toggleBundledUI();
-  els.dataSource.addEventListener('change', toggleBundledUI);
+  // ====== Bundled manifest (no remote/proxy UI) ======
+  const MANIFEST_URL = 'rtty_offline/manifest.json';
+  const bundled = { base:'', items:[], loaded:false };
 
   function deriveBaseFromUrl(url){
     const slash = url.lastIndexOf('/');
@@ -209,12 +148,11 @@
 
   async function loadManifest(){
     try{
-      els.manifestStatus.textContent = 'loading…';
-      const url = els.manifestUrl.value.trim();
+      const url = MANIFEST_URL;
       const res = await fetch(url, { cache:'no-cache' });
       if (!res.ok) throw new Error('HTTP '+res.status);
       const json = await res.json();
-      let base="", items=[];
+      let base='', items=[];
       if (Array.isArray(json)){
         items = json.slice();
         base = deriveBaseFromUrl(url);
@@ -223,26 +161,45 @@
         base = (json.base || '').trim() || deriveBaseFromUrl(url);
       } else {
         for (const [dir, arr] of Object.entries(json||{})){
-          if (Array.isArray(arr)){
-            for (const f of arr){ items.push(`${dir}/${f}`); }
-          }
+          if (Array.isArray(arr)) for (const f of arr) items.push(`${dir}/${f}`);
         }
         base = (json.base || '').trim() || deriveBaseFromUrl(url);
       }
       items = items.filter(x => /^(ARTWORK-0[1-8])\/([0-9]{3})$/.test(x));
       if (!items.length) throw new Error('manifest had no valid items');
       bundled.base = base; bundled.items = items; bundled.loaded = true;
-      els.manifestStatus.textContent = `loaded ${items.length} items from ${base||'(root)'}`;
       return true;
     }catch(e){
-      bundled.base = ""; bundled.items = []; bundled.loaded = false;
-      els.manifestStatus.textContent = 'load failed: ' + (e.message||e);
+      bundled.base = ''; bundled.items = []; bundled.loaded = false;
+      setStatus('manifest load failed: ' + (e.message||e));
       return false;
     }
   }
-  els.loadManifestBtn.addEventListener('click', loadManifest);
 
-  // ====== CR/LF constants + helpers to avoid escape confusion ======
+  async function fetchArtTextBundled(rel){
+    try{
+      const url = (bundled.base ? (bundled.base + '/') : '') + rel;
+      const r = await fetch(url, { cache:'no-cache' });
+      if (!r.ok) return '';
+      const txt = await r.text();
+      return normalizeCRLF(txt);
+    }catch{ return ''; }
+  }
+
+  async function sampleRandomArt(n){
+    if (!bundled.loaded){ const ok = await loadManifest(); if (!ok) return []; }
+    const seen = new Set();
+    const out = []; let attempts=0, maxAttempts=n*20;
+    while (out.length<n && attempts++<maxAttempts){
+      const item = bundled.items[Math.floor(Math.random()*bundled.items.length)];
+      if (seen.has(item)) continue; seen.add(item);
+      const [dir, file] = item.split('/');
+      out.push({ dir, filename:file, pagePath:item });
+    }
+    return out;
+  }
+
+  // ====== Newline helpers ======
   const CR = String.fromCharCode(13);
   const LF = String.fromCharCode(10);
   function normalizeCRLF(s){
@@ -251,102 +208,10 @@
     return (s || '').replace(re, CR + LF);
   }
 
-  // ====== Remote directory & file discovery ======
-  async function getDirs(){
-    try{
-      const html = await fetchFromAny("");
-      const doc = new DOMParser().parseFromString(html, "text/html");
-      let dirs = [...doc.querySelectorAll('a[href]')]
-        .map(a=>a.getAttribute('href')||"")
-        .map(h=> h.endsWith('/') ? h : h + '/')
-        .filter(h=> /^ARTWORK-[0-9]+\/$/.test(h))
-        .filter(d=> /^ARTWORK-0[1-8]\//.test(d));
-      return dirs.length ? dirs : FIXED_DIRS.slice();
-    } catch { return FIXED_DIRS.slice(); }
-  }
-
-  const dirCache = new Map();
-  async function getFiles(dir){
-    if (dirCache.has(dir)) return dirCache.get(dir);
-    try{
-      const html = await fetchFromAny(dir);
-      const doc = new DOMParser().parseFromString(html, "text/html");
-      const files = [...doc.querySelectorAll('a[href]')]
-        .map(a=>({name:(a.textContent||"").trim(), href:a.getAttribute('href')||""}))
-        .filter(o=> /^[0-9]+$/.test(o.name) || /^[0-9]+\/?$/.test(o.href))
-        .map(o=> o.name.endsWith('/') ? o.name.slice(0,-1) : o.name);
-      if (files.length){ dirCache.set(dir, files); return files; }
-    }catch{}
-    const probe = []; for (let i=0; i<=200; i++) probe.push(i.toString().padStart(3,'0'));
-    dirCache.set(dir, probe); return probe;
-  }
-
-  async function fetchArtTextRemote(path){
-    try{
-      const html = await fetchFromAny(path);
-      const doc = new DOMParser().parseFromString(html, "text/html");
-      const pre = doc.querySelector('pre');
-      let text = pre ? (pre.textContent||"") : (doc.body ? doc.body.textContent : html);
-      return normalizeCRLF(text);
-    }catch{ return ""; }
-  }
-
-  async function fetchArtTextBundled(rel){
-    try{
-      const url = (bundled.base ? (bundled.base + '/') : '') + rel;
-      const r = await fetch(url, { cache:'no-cache' });
-      if (!r.ok) return "";
-      const txt = await r.text();
-      return normalizeCRLF(txt);
-    }catch{ return ""; }
-  }
-
-  async function sampleRandomArt(n){
-    if (els.dataSource.value === 'bundled'){
-      if (!bundled.loaded){
-        const ok = await loadManifest();
-        if (!ok) return [];
-      }
-      const seen = new Set();
-      const out = []; let attempts=0, maxAttempts=n*20;
-      while (out.length<n && attempts++<maxAttempts){
-        const item = bundled.items[Math.floor(Math.random()*bundled.items.length)];
-        if (seen.has(item)) continue; seen.add(item);
-        const [dir, file] = item.split('/');
-        out.push({ dir, filename:file, pagePath:item, originUrl:item });
-      }
-      return out;
-    }
-    // Remote
-    const dirs = await getDirs();
-    const chosen = []; const seen = new Set();
-    let attempts = 0, maxAttempts = n * 40;
-    while (chosen.length < n && attempts++ < maxAttempts){
-      const dir = dirs[Math.floor(Math.random()*dirs.length)];
-      const files = await getFiles(dir);
-      if (!files.length) continue;
-      const fn = files[Math.floor(Math.random()*files.length)];
-      const key = dir+fn; if (seen.has(key)) continue; seen.add(key);
-      const cleanDir = dir.endsWith('/') ? dir.slice(0,-1) : dir;
-      chosen.push({ dir: cleanDir, filename: fn, pagePath: dir + fn, originUrl: ORIGIN + dir + fn });
-    }
-    let idx = 0;
-    while (chosen.length < n){
-      for (const dir of dirs){
-        const num = (idx++).toString().padStart(3,'0');
-        const key = dir+num; if (seen.has(key)) continue; seen.add(key);
-        const cleanDir = dir.endsWith('/') ? dir.slice(0,-1) : dir;
-        chosen.push({ dir: cleanDir, filename: num, pagePath: dir + num, originUrl: ORIGIN + dir + num });
-        if (chosen.length >= n) break;
-      }
-    }
-    return chosen.slice(0, n);
-  }
-
   // ====== BAUDOT / AFSK ======
   const printableSet = "#ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:;.,-'()/&$?! ";
   const replacementMap = {
-    '\"':"'", '=':'-', '*':'X', '_':'-', '@':'A', '%':'O',
+    '"':"'", '=':'-', '*':'X', '_':'-', '@':'A', '%':'O',
     '[':'(', ']':')', '{':'(', '}':')', [String.fromCharCode(92)]:'/', '^':'-', '|':'/',
     '`':"'", '~':'-', '<':'(', '>':')'
   };
@@ -412,7 +277,7 @@
       }
       const sr = audioCtx && (audioCtx.sampleRate|0);
       if (sr && sr>=8000 && sr<=192000) return sr;
-    }catch(e){ /* ignore and fall back */ }
+    }catch(e){}
     return 48000;
   }
 
@@ -421,19 +286,14 @@
     const { baud, mark, space, stopBits, sampleRate, stretch = DEFAULT_STRETCH } = opts;
     const twoPi = 2*Math.PI; const spbF = (sampleRate/baud)*stretch; let carry=0, phase=0;
     const BLOCK = 16384; let block = new Int16Array(BLOCK); let bi = 0; let total = 0;
-    const pushSample = (s) => {
-      block[bi++] = s;
-      if (bi === block.length){ onChunk(block); block = new Int16Array(BLOCK); bi = 0; }
-      total++;
-    };
+    const pushSample = (s) => { block[bi++] = s; if (bi === block.length){ onChunk(block); block = new Int16Array(BLOCK); bi = 0; } total++; };
     const flush = () => { if (bi>0){ onChunk(block.slice(0,bi)); bi = 0; } };
     const emit = (freq, bitUnits) => {
       let want = Math.floor(spbF*bitUnits + carry); carry = spbF*bitUnits + carry - want;
       const inc = twoPi*freq/sampleRate;
       for (let i=0;i<want;i++){
         const f = Math.sin(phase); phase += inc; if (phase>=twoPi) phase -= twoPi;
-        const s = (f<=1? (f>=-1? f : -1) : 1) * 32767;
-        pushSample(s|0);
+        const s = (f<=1? (f>=-1? f : -1) : 1) * 32767; pushSample(s|0);
       }
     };
     for (const f of frames){
@@ -442,9 +302,7 @@
         const code=f.code & 0x1F; emit(space,1); for (let i=0;i<5;i++){ const bit=(code>>i)&1; emit(bit?mark:space,1);} emit(mark, stopBits); if (f.guardBits&&f.guardBits>0) emit(mark, f.guardBits);
       }
     }
-    emit(mark,2.0);
-    flush();
-    return total;
+    emit(mark,2.0); flush(); return total;
   }
 
   // WAV header builder (16-bit PCM mono)
@@ -466,42 +324,43 @@
   els.buildBtn.addEventListener('click', async () => {
     try{
       els.buildBtn.disabled = true; els.downloadWrap.innerHTML = ''; els.player.src = '';
-      const n = Math.max(1, Math.min(500, parseInt(els.count.value||"25",10)));
-      const gapSec = Math.max(0, parseFloat(els.gap.value||"2"));
+      const n = Math.max(1, Math.min(500, parseInt(els.count.value||'25',10)));
+      const gapMin = Math.max(0, parseFloat(els.gap.value||'2'));
+      const gapSec = gapMin * 60;
 
       setStatus('Sampling artwork…');
       const picks = await sampleRandomArt(n);
       if (!picks.length){ setStatus('No items to process'); return; }
 
-      // Render list
+      // show list
       els.list.innerHTML = picks.map(p=>{
-        const href = (els.dataSource.value==='bundled' && bundled.base) ? `${bundled.base}/${p.pagePath}` : (p.originUrl||p.pagePath);
+        const href = bundled.base ? `${bundled.base}/${p.pagePath}` : p.pagePath;
         return `<li><a href="${href}" target="_blank" rel="noopener">${p.dir}/${p.filename}</a></li>`;
       }).join('');
       els.countInfo.textContent = `(${picks.length})`;
 
-      // Params
-      const baud  = parseFloat(els.baud.value||"45.45");
-      const stopB = parseFloat(els.stopBits.value||"1.5");
-      const mark  = parseFloat(els.mark.value||"2125");
-      const space = parseFloat(els.space.value||"2295");
+      // params
+      const baud  = parseFloat(els.baud.value||'45.45');
+      const stopB = parseFloat(els.stopBits.value||'1.5');
+      const mark  = parseFloat(els.mark.value||'2125');
+      const space = parseFloat(els.space.value||'2295');
       const sr = getSampleRate();
 
-      const maxItemMin = Math.max(0, parseFloat(els.maxMinItem.value||"0"));
-      const maxTotalMin = Math.max(1, parseFloat(els.maxMinTotal.value||"60"));
-      const splitMin = Math.max(1, parseFloat(els.splitMin.value||"30"));
+      const maxItemMin = Math.max(0, parseFloat(document.getElementById('maxMinItem').value||'0'));
+      const maxTotalMin = Math.max(1, parseFloat(document.getElementById('maxMinTotal').value||'1440'));
+      const splitMin = Math.max(1, parseFloat(document.getElementById('splitMin').value||'1440'));
 
       const PER_ITEM_LIMIT = maxItemMin>0 ? Math.floor(sr*60*maxItemMin) : Number.POSITIVE_INFINITY;
       const OVERALL_LIMIT  = Math.floor(sr*60*maxTotalMin);
-      const WAV_BYTES_LIMIT = 0xFFFFFFFF - 8; // safety
+      const WAV_BYTES_LIMIT = 0xFFFFFFFF - 8; // RIFF safety margin
       const SEG_LIMIT_BY_SPLIT = Math.floor(sr*60*splitMin);
       const SEG_LIMIT_BY_WAV = Math.floor(WAV_BYTES_LIMIT/2);
       const SEG_LIMIT = Math.min(SEG_LIMIT_BY_SPLIT, SEG_LIMIT_BY_WAV);
 
-      // Diagnostics
-      const stats = { empties:0, estZero:0, tooLongSkipped:0, tooLongStreamed:0, stoppedOverall:false, segments:0 };
+      // diagnostics
+      const stats = { empties:0, tooLongSkipped:0, tooLongStreamed:0, stoppedOverall:false, segments:0 };
 
-      // Segment accumulators
+      // segment accumulators
       let segChunks = []; // Uint8Array pieces (PCM)
       let segSamples = 0; let segIndex = 1; let overallSamples = 0;
       const openNewSegment = () => { segChunks = []; segSamples = 0; };
@@ -522,7 +381,6 @@
       };
       openNewSegment();
 
-      // segment-safe sink
       const pushPCM = (int16Arr) => {
         let off = 0;
         while (off < int16Arr.length){
@@ -530,7 +388,6 @@
           if (room <= 0){ flushSegment(); openNewSegment(); continue; }
           const take = Math.min(room, int16Arr.length - off);
           const view = new Uint8Array(int16Arr.buffer, int16Arr.byteOffset + off*2, take*2);
-          // copy to detach from backing buffer
           const copy = new Uint8Array(take*2); copy.set(view);
           segChunks.push(copy);
           segSamples += take; overallSamples += take; off += take;
@@ -550,7 +407,7 @@
         return true;
       };
 
-      // exact sample estimator based on frames (for optional skip only)
+      // estimator (for optional skipping only)
       const spb = (sr / baud) * DEFAULT_STRETCH;
       const estimateSamples = (frames) => {
         let bitUnits = 0;
@@ -562,27 +419,23 @@
         return Number.isFinite(est) && est > 0 ? est : 0;
       };
 
-      // Process items
+      // process items
       let used = 0;
       for (let i=0; i<picks.length; i++){
         setStatus(`Fetching ${i+1}/${picks.length}… ${picks[i].dir}/${picks[i].filename}`);
-        let raw="";
-        if (els.dataSource.value === 'bundled') raw = await fetchArtTextBundled(picks[i].pagePath);
-        else raw = await fetchArtTextRemote(picks[i].pagePath);
+        const raw = await fetchArtTextBundled(picks[i].pagePath);
         if (!raw || !raw.trim()){ stats.empties++; continue; }
         const text = normalizeText(raw);
         const frames = buildBaudotFramesFromText(text);
 
         const est = estimateSamples(frames);
-        if (maxItemMin>0 && est>PER_ITEM_LIMIT){ stats.tooLongSkipped++; continue; }
+        if (PER_ITEM_LIMIT !== Number.POSITIVE_INFINITY && est>PER_ITEM_LIMIT){ stats.tooLongSkipped++; continue; }
         if (est>SEG_LIMIT){ stats.tooLongStreamed++; /* will split across files */ }
 
-        // stream into chunks
         afskStream(frames, { baud, mark, space, stopBits: stopB, sampleRate: sr }, (i16) => { pushPCM(i16); });
         used++;
 
-        // gap after, if not last
-        if (gapSec>0 && i<picks.length-1){
+        if ((gapSec>0) && (i<picks.length-1)){
           const gapSamp = Math.max(0, Math.round(sr * gapSec));
           if (!(await emitSilence(gapSamp))) break;
         }
@@ -590,7 +443,7 @@
       }
 
       // finalize
-      const lastUrl = flushSegment();
+      flushSegment();
       if (!used){
         let msg = 'No items added.';
         msg += ` empties:${stats.empties}`;
@@ -606,15 +459,12 @@
       const note = stats.stoppedOverall ? ' · hit overall cap' : '';
       setStatus(`Ready · segments: ${stats.segments} · items: ${used} · total ~ ${totalMin.toFixed(1)} min${note}`);
 
-    }catch(e){
-      console.error(e); setStatus('Error: ' + (e.message||e));
-    }finally{
-      els.buildBtn.disabled = false;
-    }
+    }catch(e){ console.error(e); setStatus('Error: ' + (e.message||e)); }
+    finally{ els.buildBtn.disabled = false; }
   });
 
   // ====== Self-tests ======
-  function encodeWav(samples, sampleRate){ // kept for tests
+  function encodeWav(samples, sampleRate){ // kept for tests only
     const buffer = new ArrayBuffer(44 + samples.length*2); const view = new DataView(buffer);
     const putStr=(o,s)=>{ for(let i=0;i<s.length;i++) view.setUint8(o+i, s.charCodeAt(i)); };
     putStr(0,'RIFF'); view.setUint32(4, 36 + samples.length*2, true);
@@ -632,7 +482,6 @@
   function runTests(){
     const log=[]; const ok=(m)=>log.push('✅ '+m); const bad=(m)=>log.push('❌ '+m);
     try{
-      // existing tests
       const tCRLF = normalizeText('A' + CR + LF + 'B');
       if (tCRLF.indexOf('A' + CR + LF + 'B') !== -1) ok('CRLF preserved by normalizeText'); else bad('CRLF not preserved');
       const tSlash = normalizeText('X' + String.fromCharCode(92) + 'Y');
@@ -649,11 +498,7 @@
       const fNums = buildBaudotFramesFromText('12' + CR + LF);
       const sawFIGS = fNums.some(f => f.type==='char' && f.code===FIGS);
       if (sawFIGS) ok('FIGS shift emitted for digits'); else bad('FIGS shift not emitted for digits');
-      const sig = (function(){
-        // tiny signal for header test
-        const arr = []; const twoPi=2*Math.PI; let ph=0; const inc=twoPi*100/48000; for(let i=0;i<1000;i++){ arr.push(Math.sin(ph)); ph+=inc; }
-        return arr;
-      })();
+      const sig = (function(){ const arr = []; const twoPi=2*Math.PI; let ph=0; const inc=twoPi*100/48000; for(let i=0;i<1000;i++){ arr.push(Math.sin(ph)); ph+=inc; } return arr; })();
       const wav = encodeWav(new Float32Array(sig), 48000);
       const dv = new DataView(wav);
       const tag = String.fromCharCode(dv.getUint8(0),dv.getUint8(1),dv.getUint8(2),dv.getUint8(3));
@@ -667,15 +512,12 @@
       const fmtTag = String.fromCharCode(dv.getUint8(12),dv.getUint8(13),dv.getUint8(14),dv.getUint8(15));
       const dataTag = String.fromCharCode(dv.getUint8(36),dv.getUint8(37),dv.getUint8(38),dv.getUint8(39));
       if (fmtTag==='fmt ' && dataTag==='data') ok('fmt/data chunks present'); else bad('fmt/data chunks missing');
-
-      // new tests: header builder + streaming
       const h = makeWavHeader(48000, 48000*60);
       if (new DataView(h).getUint32(40, true) === 48000*60*2) ok('makeWavHeader data size correct'); else bad('makeWavHeader size wrong');
       let chunks = 0; const framesTest = buildBaudotFramesFromText('TEST' + CR + LF);
-      afskStream(framesTest, { baud:45.45, mark:2125, space:2295, stopBits:1.5, sampleRate:48000 }, (i16)=>{ chunks++; });
+      afskStream(framesTest, { baud:45.45, mark:2125, space:2295, stopBits:1.5, sampleRate:48000 }, ()=>{ chunks++; });
       if (chunks>0) ok('afskStream emitted chunks'); else bad('afskStream emitted no chunks');
-      const srTest = getSampleRate();
-      if (srTest>=8000 && srTest<=192000) ok('getSampleRate sane: '+srTest); else bad('getSampleRate out of range: '+srTest);
+      const srTest = getSampleRate(); if (srTest>=8000 && srTest<=192000) ok('getSampleRate sane: '+srTest); else bad('getSampleRate out of range: '+srTest);
     }catch(e){ bad('Exception in tests: '+(e.message||e)); }
     els.testLog.style.display='block';
     els.testLog.textContent = log.join('\n');
