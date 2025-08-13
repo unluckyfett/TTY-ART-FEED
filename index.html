@@ -21,6 +21,9 @@
     .row { display:grid; grid-template-columns: 1fr 1fr; gap:8px; margin-bottom:8px; }
     .status { color:var(--muted); font-size:12px; margin-top:6px; min-height:18px; }
     .list { max-height:48vh; overflow:auto; border-top:1px dashed #2a3040; margin-top:8px; padding-top:8px; }
+    .preview { max-height:48vh; overflow:auto; border-top:1px dashed #2a3040; margin-top:8px; padding-top:8px; }
+    .art-head { display:flex; align-items:center; gap:8px; font-size:13px; margin-top:4px; }
+    .art-pre { white-space: pre; font-family: ui-monospace, Menlo, Consolas, monospace; font-size:12px; line-height:1.12; background:#0b0c10; color:#cfe3ff; border:1px solid #2a3040; border-radius:10px; padding:8px; max-height:32vh; overflow:auto; margin:6px 0 12px; }
     audio { width:100%; margin-top:10px; }
     .muted { color:var(--muted); }
     .links a{ display:inline-block; margin:6px 8px 0 0; }
@@ -60,6 +63,14 @@
           <label>Gap between pieces (min)</label>
           <input id="gap" type="number" value="2" min="0" step="0.1" />
         </div>
+      </div>
+
+      <div class="row">
+        <div>
+          <label>Mark lead‑in (sec)</label>
+          <input id="leadSec" type="number" value="5" min="0" step="0.5" />
+        </div>
+        <div></div>
       </div>
 
       <div class="row">
@@ -127,8 +138,8 @@
     </div>
 
     <div class="card">
-      <div><b>Selected items</b> <span class="muted" id="countInfo"></span></div>
-      <ol id="list" class="list"></ol>
+      <div><b>Preview (randomized selection)</b> <span class="muted" id="countInfo"></span></div>
+      <div id="preview" class="preview"></div>
     </div>
   </div>
 
@@ -158,7 +169,7 @@
     buildBtn: document.getElementById('buildBtn'),
     status: document.getElementById('status'),
     player: document.getElementById('player'),
-    list: document.getElementById('list'),
+    preview: document.getElementById('preview'),
     countInfo: document.getElementById('countInfo'),
     downloadWrap: document.getElementById('downloadWrap'),
     baud: document.getElementById('baudRate'),
@@ -167,6 +178,7 @@
     space: document.getElementById('spaceFreq'),
     count: document.getElementById('count'),
     gap: document.getElementById('gap'),
+    leadSec: document.getElementById('leadSec'),
     testBtn: document.getElementById('testBtn'),
     testLog: document.getElementById('testLog'),
     nsfwMode: document.getElementById('nsfwMode'),
@@ -175,6 +187,26 @@
     nsfwCancel: document.getElementById('nsfwCancel')
   };
   var setStatus = function(s){ els.status.textContent = s; };
+
+  // ====== Preview builder ======
+  function renderPreviews(picks){
+    var wrap = els.preview; if (!wrap) return; wrap.innerHTML = '';
+    for (var i=0;i<picks.length;i++){
+      (function(p){
+        var sec = document.createElement('section');
+        var head = document.createElement('div'); head.className = 'art-head';
+        var a = document.createElement('a');
+        var href = bundled.base ? (bundled.base + '/' + p.pagePath) : p.pagePath;
+        a.href = href; a.target = '_blank'; a.rel = 'noopener'; a.textContent = p.dir + '/' + p.filename;
+        head.appendChild(a);
+        var pre = document.createElement('pre'); pre.className = 'art-pre'; pre.textContent = '…loading…';
+        sec.appendChild(head); sec.appendChild(pre); wrap.appendChild(sec);
+        fetchArtTextBundled(p.pagePath)
+          .then(function(raw){ var txt = normalizeText(raw||''); p.normalizedText = txt; pre.textContent = txt || '(empty)'; })
+          .catch(function(){ pre.textContent = '(load error)'; });
+      })(picks[i]);
+    }
+  }
 
   // ====== NSFW toggle (custom modal) ======
   (function(){
@@ -413,18 +445,16 @@
     var gapMin = Math.max(0, parseFloat(els.gap.value||'2'));
     var gapSec = gapMin * 60;
 
+    // solid MARK lead to wake autostarts
+    var leadSec = Math.max(0, parseFloat((els.leadSec && els.leadSec.value) || '5'));
+
     setStatus('Sampling artwork…');
     sampleRandomArt(n).then(function(picks){
       if (!picks.length){ setStatus('No items to process'); els.buildBtn.disabled=false; return; }
 
-      // show list
-      var html = '';
-      for (var i=0;i<picks.length;i++){
-        var p = picks[i];
-        var href = bundled.base ? (bundled.base + '/' + p.pagePath) : p.pagePath;
-        html += '<li><a href="'+href+'" target="_blank" rel="noopener">'+p.dir+'/'+p.filename+'</a></li>';
-      }
-      els.list.innerHTML = html; els.countInfo.textContent = '('+picks.length+')';
+      // show previews instead of list
+      els.countInfo.textContent = '('+picks.length+')';
+      renderPreviews(picks);
 
       // params
       var baud  = parseFloat(els.baud.value||'45.45');
@@ -514,14 +544,15 @@
       function processNext(){
         if (i >= picks.length){ done(); return; }
         setStatus('Fetching '+(i+1)+'/'+picks.length+'… '+picks[i].dir+'/'+picks[i].filename);
-        fetchArtTextBundled(picks[i].pagePath).then(function(raw){
-          if (!raw || !raw.trim()){ stats.empties++; i++; processNext(); return; }
-          var text = normalizeText(raw);
+        (picks[i].normalizedText ? Promise.resolve(picks[i].normalizedText) : fetchArtTextBundled(picks[i].pagePath).then(function(raw){ var t = normalizeText(raw); picks[i].normalizedText = t; return t; }))
+        .then(function(text){
           var frames = buildBaudotFramesFromText(text);
-          var est = estimateSamples(frames);
+          var framesAll = frames;
+          if (leadSec > 0){ framesAll = [{ type:'hold', sec: leadSec }].concat(frames); }
+          var est = estimateSamples(framesAll);
           if (PER_ITEM_LIMIT !== Number.POSITIVE_INFINITY && est>PER_ITEM_LIMIT){ stats.tooLongSkipped++; i++; processNext(); return; }
-          if (est>SEG_LIMIT){ stats.tooLongStreamed++; /* split across files */ }
-          afskStream(frames, { baud:baud, mark:mark, space:space, stopBits:stopB, sampleRate:sr }, function(i16){ pushPCM(i16); });
+          if (est>SEG_LIMIT){ stats.tooLongStreamed++; }
+          afskStream(framesAll, { baud:baud, mark:mark, space:space, stopBits:stopB, sampleRate:sr }, function(i16){ pushPCM(i16); });
           used++;
           if ((gapSec>0) && (i<picks.length-1)){
             var gapSamp = Math.max(0, Math.round(sr * gapSec));
@@ -617,6 +648,9 @@
         if (onlyLF[t].type==='char' && onlyLF[t].code===BAUDOT_TABLE.LTRS[CR] && onlyLF[t+1].type==='char' && onlyLF[t+1].code===BAUDOT_TABLE.LTRS[LF]){ hasCRBeforeLF = true; break; }
       }
       if (hasCRBeforeLF) ok('CR injected before LF'); else bad('CR not injected before LF');
+      // Hold-mark should generate about 1 second of samples at 48k
+      var nHold = afskStream([{type:'hold', sec:1}], { baud:45.45, mark:2125, space:2295, stopBits:1.5, sampleRate:48000 }, function(){});
+      if (nHold > 44000 && nHold < 52000) ok('Hold-mark ~1s produced '+nHold+' samples'); else bad('Hold-mark length off: '+nHold);
     }catch(e){ bad('Exception in tests: '+(e.message||e)); }
     els.testLog.style.display='block';
     els.testLog.textContent = log.join('\n');
