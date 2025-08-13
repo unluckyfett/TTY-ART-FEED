@@ -1,4 +1,4 @@
-# RTTY Art WAV Builder
+# TTY Art feed
 
 A single‑page web app that turns vintage **RTTY/TTY art** into **AFSK WAV audio** you can play to a teletype, radio modem, or software decoder. It works fully offline with a bundled archive and includes SFW/NSFW filtering, art‑set selection, a per‑piece **MARK lead‑in** (to wake auto‑starts), and automatic WAV splitting by time/size.
 
@@ -9,6 +9,8 @@ A single‑page web app that turns vintage **RTTY/TTY art** into **AFSK WAV audi
 ---
 
 ## Quick start (GitHub Pages)
+
+Live Demo:https://unluckyfett.github.io/TTY-ART-FEED/
 
 1. Put the app at the repo root:
 
