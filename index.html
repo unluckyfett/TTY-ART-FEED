@@ -288,9 +288,13 @@
   function parseNsfwList(txt){
     if (!txt) return Object.create(null);
     var arr = [];
-    try { var j = JSON.parse(txt); if (Array.isArray(j)) arr = j; } catch(e){ arr = txt.split(/
-?
-/); }
+    try {
+      var j = JSON.parse(txt);
+      if (Array.isArray(j)) arr = j;
+      else if (j && Array.isArray(j.items)) arr = j.items;
+    } catch(e){
+      arr = txt.split(/\r?\n/);
+    }
     var m = Object.create(null);
     for (var i=0;i<arr.length;i++){
       var s = (arr[i]||'').trim();
@@ -339,14 +343,11 @@
       var mode = (els.nsfwMode && els.nsfwMode.value) || 'sfw';
       var pool = bundled.items.slice();
       pool = pool.filter(isInSelectedSet);
-      if (mode !== 'nsfw'){
-        pool = pool.filter(isSfwAllowed);
-      }
+      if (mode !== 'nsfw') pool = pool.filter(isSfwAllowed);
       if (!pool.length) return [];
-      var seen = Object.create(null);
-      var out = []; var attempts=0, maxAttempts=n*20;
+      var seen = Object.create(null); var out = []; var attempts=0, maxAttempts=n*20;
       while (out.length<n && attempts++<maxAttempts){
-        var item = pool[Math.floor(Math.random()*pool.length)];
+        var item = pool[(Math.random()*pool.length)|0];
         if (seen[item]) continue; seen[item] = 1;
         var parts = item.split('/');
         out.push({ dir: parts[0], filename: parts[1], pagePath: item });
@@ -355,22 +356,6 @@
     }
     if (!bundled.loaded || !nsfwOverrides.loaded){
       return ensureLoaded().then(function(ok){ return ok ? pick() : []; });
-    }
-    return Promise.resolve(pick());
-  }
-      if (!pool.length) return [];
-      var seen = Object.create(null);
-      var out = []; var attempts=0, maxAttempts=n*20;
-      while (out.length<n && attempts++<maxAttempts){
-        var item = pool[Math.floor(Math.random()*pool.length)];
-        if (seen[item]) continue; seen[item] = 1;
-        var parts = item.split('/');
-        out.push({ dir: parts[0], filename: parts[1], pagePath: item });
-      }
-      return out;
-    }
-    if (!bundled.loaded){
-      return loadManifest().then(function(ok){ return ok ? pick() : []; });
     }
     return Promise.resolve(pick());
   }
@@ -745,6 +730,11 @@
       // Hold-mark should generate about 1 second of samples at 48k
       var nHold = afskStream([{type:'hold', sec:1}], { baud:45.45, mark:2125, space:2295, stopBits:1.5, sampleRate:48000 }, function(){});
       if (nHold > 44000 && nHold < 52000) ok('Hold-mark ~1s produced '+nHold+' samples'); else bad('Hold-mark length off: '+nHold);
+      // parseNsfwList newline and JSON tests
+      var mapTxt = parseNsfwList('ARTWORK-01/123\nARTWORK-02/045\n');
+      if (mapTxt['ARTWORK-01/123'] && mapTxt['ARTWORK-02/045']) ok('parseNsfwList handles newline list'); else bad('parseNsfwList newline parse failed');
+      var mapJson = parseNsfwList('["ARTWORK-03/001","ARTWORK-05/222"]');
+      if (mapJson['ARTWORK-03/001'] && mapJson['ARTWORK-05/222']) ok('parseNsfwList handles JSON array'); else bad('parseNsfwList JSON parse failed');
     }catch(e){ bad('Exception in tests: '+(e.message||e)); }
     els.testLog.style.display='block';
     els.testLog.textContent = log.join('\n');
