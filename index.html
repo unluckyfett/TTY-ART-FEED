@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>TTY Art Feed</title>
+  <title>RTTY Art WAV Builder</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     :root { --bg:#0e0f12; --panel:#16181d; --ink:#e6e7eb; --muted:#9aa0a6; --accent:#7aa2ff; }
@@ -211,7 +211,7 @@
   <footer style="margin:12px; text-align:left;">
     <img src="logo.png" alt="Logo" style="height:75px; width:auto; display:block; margin-bottom:6px;">
     <p style="font-size:0.8em; color:#888; margin:0;">
-      © 2025 Frankie Caswell — UI Licensed under
+      © 2025 Frankie Caswell — Licensed under
       <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener">CC BY 4.0</a>.
     </p>
   </footer>
@@ -800,3 +800,28 @@
       // Hold-mark should generate about 1 second of samples at 48k
       var nHold = afskStream([{type:'hold', sec:1}], { baud:45.45, mark:2125, space:2295, stopBits:1.5, sampleRate:48000 }, function(){});
       if (nHold > 44000 && nHold < 52000) ok('Hold-mark ~1s produced '+nHold+' samples'); else bad('Hold-mark length off: '+nHold);
+
+      // Finish tests: dump log and status
+      var failures = 0; for (var qi=0; qi<log.length; qi++){ if (log[qi].indexOf('❌')===0) failures++; }
+      var out = log.join('
+');
+      if (els.testLog){ els.testLog.style.display = 'block'; els.testLog.textContent = out; }
+      setStatus('Self-test completed: ' + (failures===0 ? 'all pass' : (failures+' failure(s)')));
+    } catch (e) {
+      bad('Unhandled test error: ' + (e && e.message ? e.message : e));
+      if (els.testLog){ els.testLog.style.display='block'; els.testLog.textContent = log.join('
+'); }
+      setStatus('Self-test crashed: ' + (e && e.message ? e.message : e));
+    }
+  }
+
+  // Hook self-test button
+  if (els.testBtn) {
+    els.testBtn.addEventListener('click', function(){
+      setStatus('Running self-test…');
+      runTests();
+    });
+  }
+
+})();
+</script></body></html>
