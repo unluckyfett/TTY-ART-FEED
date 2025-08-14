@@ -8,91 +8,7 @@ A single‑page web app that turns vintage **RTTY/TTY art** into **AFSK WAV audi
 
 ---
 
-## Quick start (GitHub Pages)
-
 Live Demo:https://unluckyfett.github.io/TTY-ART-FEED/
-
-1. Put the app at the repo root:
-
-   * `index.html` (the file in this repo)
-   * `rtty_offline/` (folder; see below)
-2. Enable **GitHub Pages** → *Settings → Pages* → deploy from the `main` branch.
-3. Visit your Pages URL and click **Build WAV**.
-
-> The app is completely client‑side. No server or APIs are required.
-
----
-
-## Folder layout
-
-```
-repo/
-├─ index.html                  # RTTY Art WAV Builder UI (this app)
-└─ rtty_offline/
-   ├─ manifest.json            # list of bundled artworks
-   ├─ nsfw_list.json           # optional manual NSFW overrides
-   ├─ ARTWORK-01/
-   │  ├─ 000
-   │  ├─ 001
-   │  └─ ...
-   ├─ ARTWORK-02/
-   │  └─ ...
-   └─ ... (up to ARTWORK-08)
-```
-
-### `manifest.json` formats
-
-The app accepts **any** of these shapes:
-
-**Simple array** (recommended):
-
-```json
-[
-  "ARTWORK-01/000",
-  "ARTWORK-01/001",
-  "ARTWORK-02/045"
-]
-```
-
-**Object with items (+optional base):**
-
-```json
-{
-  "base": "rtty_offline",
-  "items": ["ARTWORK-01/000", "ARTWORK-02/045"]
-}
-```
-
-**Grouped by folder:**
-
-```json
-{
-  "base": "rtty_offline",
-  "ARTWORK-01": ["000","001"],
-  "ARTWORK-02": ["045"]
-}
-```
-
-All entries must match `ARTWORK-0[1-8]/[0-9][0-9][0-9]` and the files must exist in `rtty_offline/`.
-
-### `nsfw_list.json` (optional)
-
-SFW mode **always** excludes whole sets **ARTWORK‑04**, **ARTWORK‑07**, **ARTWORK‑08**. You can add specific files from any set to exclude in SFW by listing them here. Two accepted formats:
-
-**JSON array**:
-
-```json
-["ARTWORK-01/123", "ARTWORK-05/007"]
-```
-
-**Plain text** (newline separated):
-
-```
-ARTWORK-01/123
-ARTWORK-05/007
-```
-
-Place this file at: `rtty_offline/nsfw_list.json`. It’s optional; if missing, the app continues without overrides.
 
 ---
 
@@ -116,24 +32,6 @@ Place this file at: `rtty_offline/nsfw_list.json`. It’s optional; if missing, 
 * Audio generation uses the Web Audio sample rate when available; otherwise **48 kHz**.
 * Modern desktop browsers recommended. Mobile works, but large WAVs may be memory‑heavy.
 * Autoplay: browsers require a user gesture; clicking **Build WAV** satisfies this. The **Mark lead‑in** helps wake external decoders.
-
----
-
-## Troubleshooting
-
-* **“idle” forever / no downloads** → Check the browser console and ensure `rtty_offline/manifest.json` is reachable and has valid entries.
-* **“No items to process”** → Your filters removed everything (e.g., SFW + restrictive Art set). Try NSFW or a different set/count.
-* **Segments stop early** → You hit *Max minutes total*; increase it or reduce Count.
-* **“Invalid array length” (very large builds)** → Reduce *Split every* minutes (creates more, smaller WAV files) and/or lower Count.
-* **NSFW overrides not applied** → Confirm the path format (e.g., `ARTWORK-01/123`). Reload after editing `nsfw_list.json`.
-
----
-
-## Developing / Updating content
-
-You can populate `rtty_offline/` by hand (download from the archive) or with your own scripts. After adding/removing files, update `manifest.json` accordingly. No build step is required—the app loads the manifest at runtime.
-
-If you host behind a CDN or different path, keep `manifest.json` in `rtty_offline/` so the app derives a correct base URL automatically.
 
 ---
 
